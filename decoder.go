@@ -92,7 +92,7 @@ func DecodeWithUpsampling(r io.Reader) (image.Image, error) {
 	// Apply upsampling for subsampled components
 	dec.upsampleComponents()
 
-	return dec.toImageUpsampled(), nil
+	return dec.pictureUpsampled(), nil
 }
 
 // Decode decodes a JPEG2000 image
@@ -142,7 +142,7 @@ func Decode(r io.Reader) (image.Image, error) {
 	dec.applyJP2Transforms()
 
 	// Convert to image.RGBA
-	return dec.toImage(), nil
+	return dec.picture(), nil
 }
 
 // DecodeWithOptions decodes a JPEG2000 image with progressive decoding options.
@@ -211,7 +211,7 @@ func DecodeWithOptions(r io.Reader, opts DecodeOptions) (image.Image, error) {
 	dec.applyJP2Transforms()
 
 	// Convert to image.RGBA
-	return dec.toImage(), nil
+	return dec.picture(), nil
 }
 
 // extractCodestream finds the codestream in JP2 container or returns raw data.
@@ -655,6 +655,92 @@ func (d *Decoder) toImageUpsampled() *image.RGBA {
 }
 
 // toImage converts decoded components to image.RGBA
+// isCMYK reports a four-component picture whose own JP2 header says its
+// components are cyan, magenta, yellow and black -- enumerated colour space
+// 12 of ITU-T T.800 Table I.1.
+//
+// It is the FILE that is asked, not the component count: four components can
+// as easily be red, green, blue and an alpha channel, and a cdef box would say
+// so. Only a file that names CMYK is read as CMYK.
+func (d *Decoder) isCMYK() bool {
+	return d.jp2Meta != nil &&
+		d.jp2Meta.ColorMethod == JP2ColorEnumerated &&
+		d.jp2Meta.ColorSpace == JP2ColorCMYK &&
+		d.header != nil && d.header.NumComps == 4 &&
+		len(d.components) == 4
+}
+
+// picture returns the decoded image in the colour model the file's own header
+// names.
+//
+// Before this, every picture of three components or more came back as an
+// image.RGBA built from the first three, so a CMYK picture lost its black
+// plate silently -- 255 levels from a reference on every pixel of the one in
+// go-pdfkit's corpus. It now comes back as an image.CMYK and a caller that
+// knows what to do with ink can do it.
+func (d *Decoder) picture() image.Image {
+	if d.isCMYK() {
+		return d.toCMYK()
+	}
+	return d.toImage()
+}
+
+// pictureUpsampled is picture() for the DecodeWithUpsampling path, which has
+// already brought every component up to the full grid. A CMYK picture reaches
+// it by the same rule, so the two entry points cannot disagree about what a
+// file is.
+func (d *Decoder) pictureUpsampled() image.Image {
+	if d.isCMYK() {
+		return d.toCMYK()
+	}
+	return d.toImageUpsampled()
+}
+
+// toCMYK mirrors toImage for a picture whose four planes are ink. It asks the
+// same questions in the same order -- subsampling, then which transform -- and
+// differs in one thing: the fourth plane is kept rather than dropped.
+func (d *Decoder) toCMYK() image.Image {
+	reversible := d.header.WaveletFilter == Wavelet53
+	needsTransform := d.needsColorTransform()
+
+	hasSubsampling := false
+	comp0Width := d.header.ComponentWidth(0)
+	comp0Height := d.header.ComponentHeight(0)
+	for c := 1; c < 3; c++ {
+		if d.header.ComponentWidth(c) != comp0Width ||
+			d.header.ComponentHeight(c) != comp0Height {
+			hasSubsampling = true
+			break
+		}
+	}
+	if hasSubsampling && needsTransform {
+		d.upsampleComponents()
+	}
+
+	height := len(d.components[0])
+	width := 0
+	if height > 0 {
+		width = len(d.components[0][0])
+	}
+
+	if needsTransform && (!reversible || d.needsICTForYCbCr()) {
+		floatComps := make([][][]float64, 4)
+		for c := range 4 {
+			floatComps[c] = make([][]float64, len(d.components[c]))
+			for y := range d.components[c] {
+				floatComps[c][y] = make([]float64, len(d.components[c][y]))
+				for x := range d.components[c][y] {
+					floatComps[c][y][x] = float64(d.components[c][y][x])
+				}
+			}
+		}
+		return convertToCMYKFloat(floatComps, width, height,
+			d.header.BitDepth, d.header.Signed)
+	}
+	return convertToCMYK(d.components, width, height,
+		d.header.BitDepth, d.header.Signed, reversible && needsTransform)
+}
+
 func (d *Decoder) toImage() *image.RGBA {
 	reversible := d.header.WaveletFilter == Wavelet53
 
