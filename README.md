@@ -1,4 +1,17 @@
-# go-jpeg2000
+# jpeg2000
+
+> **A fork of [ajroetker/go-jpeg2000](https://github.com/ajroetker/go-jpeg2000)**,
+> under the same Apache-2.0 licence. It exists so that a fix can be used
+> without waiting on an upstream that has not published since February.
+> The import path is `github.com/go-images/jpeg2000`. Every change made here
+> is stated in [NOTICE](NOTICE), as Apache-2.0 section 4(b) requires.
+>
+> **What differs today:** a four-component picture whose JP2 header declares
+> the enumerated colour space **CMYK** decodes to an `*image.CMYK` instead of
+> an `*image.RGBA` built from its first three components — which discarded the
+> black plate. Measured against poppler on the reference picture: **255 levels
+> of disagreement on every pixel became at most 2**, over 2 440 044 samples.
+
 
 [![Go](https://github.com/ajroetker/go-jpeg2000/actions/workflows/go.yml/badge.svg)](https://github.com/ajroetker/go-jpeg2000/actions/workflows/go.yml)
 
