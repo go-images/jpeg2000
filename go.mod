@@ -1,4 +1,4 @@
-module github.com/ajroetker/go-jpeg2000
+module github.com/go-images/jpeg2000
 
 go 1.26
 

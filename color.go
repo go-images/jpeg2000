@@ -453,3 +453,121 @@ func convertToRGBAFloat(components [][][]float64, width, height int,
 
 	return img
 }
+
+// convertToCMYK converts four decoded components to an image.CMYK.
+//
+// A JPEG 2000 file says what its components mean, in the enumerated colour
+// space of its own JP2 header. EnumCS 12 is CMYK, and its four planes are
+// amounts of ink with nought meaning none -- image.CMYK's convention too, so
+// the samples map straight across once the display offset of ITU-T T.800
+// G.1.2 and any n-bit to 8-bit scaling are applied.
+//
+// A multi-component transform, when the codestream signals one, was applied to
+// the FIRST THREE components. RCT and ICT are defined over three correlated
+// planes and say nothing about what those planes mean, so for a CMYK picture
+// they carry cyan, magenta and yellow. The fourth is black and is never part
+// of the transform. Undoing it is therefore the same arithmetic as for a
+// colour picture; what differs is that the fourth plane is KEPT.
+//
+// Reading the four planes as red, green, blue and nothing is what this
+// replaces, and it does not lose a rounding: it loses most of the ink on a
+// printed page.
+func convertToCMYK(components [][][]int32, width, height int,
+	bitDepths []int, signed []bool, reversible bool) *image.CMYK {
+
+	img := image.NewCMYK(image.Rect(0, 0, width, height))
+
+	getBitDepth := func(c int) int {
+		if c < len(bitDepths) && bitDepths[c] > 0 {
+			return bitDepths[c]
+		}
+		return 8
+	}
+
+	planes := [4][][]int32{components[0], components[1], components[2], components[3]}
+	if reversible {
+		if sameShape(components[0], components[1]) && sameShape(components[0], components[2]) {
+			planes[0], planes[1], planes[2] = applyRCT(components[0], components[1], components[2])
+		}
+	}
+
+	for c := range 4 {
+		bitDepth := getBitDepth(c)
+		offset := int32(1) << (bitDepth - 1)
+		maxVal := int32(1)<<bitDepth - 1
+		plane := planes[c]
+		for y := range height {
+			for x := range width {
+				val := getComponentSample(plane, x, y, width, height) + offset
+				if bitDepth != 8 {
+					val = (val*255 + maxVal/2) / maxVal
+				}
+				img.Pix[img.PixOffset(x, y)+c] = clampToUint8(val)
+			}
+		}
+	}
+	return img
+}
+
+// convertToCMYKFloat is convertToCMYK for the irreversible path, where the
+// transform is the ICT and the components arrive as floats.
+//
+// The display offset goes on the FIRST plane BEFORE the inverse transform, as
+// it does in convertToRGBAFloat and for the same reason: the encoder applied
+// the level shift after the forward transform, so undoing them in the other
+// order would move every colour. The two chroma-like planes are already
+// centred on nought. The fourth plane is outside the transform and takes its
+// own offset afterwards.
+func convertToCMYKFloat(components [][][]float64, width, height int,
+	bitDepths []int, signed []bool) *image.CMYK {
+
+	img := image.NewCMYK(image.Rect(0, 0, width, height))
+
+	getBitDepth := func(c int) int {
+		if c < len(bitDepths) && bitDepths[c] > 0 {
+			return bitDepths[c]
+		}
+		return 8
+	}
+	scaleOf := func(c int) float64 {
+		if getBitDepth(c) == 8 {
+			return 1.0
+		}
+		return 255.0 / float64(uint(1)<<getBitDepth(c)-1)
+	}
+
+	first := components[0]
+	firstOffset := float64(uint(1) << (getBitDepth(0) - 1))
+	shifted := make([][]float64, len(first))
+	for i := range first {
+		shifted[i] = make([]float64, len(first[i]))
+		for j := range first[i] {
+			shifted[i][j] = first[i][j] + firstOffset
+		}
+	}
+	c0, c1, c2 := applyICT(shifted, components[1], components[2])
+
+	kOffset := float64(uint(1) << (getBitDepth(3) - 1))
+	kScale := scaleOf(3)
+	s0, s1, s2 := scaleOf(0), scaleOf(1), scaleOf(2)
+	k := components[3]
+
+	for y := range height {
+		for x := range width {
+			idx := img.PixOffset(x, y)
+			img.Pix[idx+0] = clampFloat(c0[y][x] * s0)
+			img.Pix[idx+1] = clampFloat(c1[y][x] * s1)
+			img.Pix[idx+2] = clampFloat(c2[y][x] * s2)
+			img.Pix[idx+3] = clampFloat((k[y][x] + kOffset) * kScale)
+		}
+	}
+	return img
+}
+
+// sameShape reports two planes a transform may be applied across.
+func sameShape(a, b [][]int32) bool {
+	if len(a) != len(b) || len(a) == 0 {
+		return false
+	}
+	return len(a[0]) == len(b[0])
+}
