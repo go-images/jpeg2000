@@ -802,3 +802,38 @@ func BenchmarkSynthesize2D_MultiLevel(b *testing.B) {
 		Synthesize2D_97(coeffs, width, height, levels)
 	}
 }
+
+// TestSynthesize97AtAnOddOriginWithAnOddSide pins the panic that
+// TestSynthesize2D_97_WithDims_BlockTail found by accident.
+//
+// The 1D pass splits a signal of odd length into (n+1)/2 and n/2, and gives
+// the larger half to `low` when the resolution's origin is even and to `high`
+// when it is odd. `ensure` sized `high` to the smaller half, so a tile at an
+// odd origin whose longest side was odd asked for one element more than it
+// had and the decoder died on a slice bound -- a crash, on a file that is
+// perfectly legal.
+func TestSynthesize97AtAnOddOriginWithAnOddSide(t *testing.T) {
+	for _, n := range []int{3, 5, 7, 9, 15} {
+		for _, cas := range []int{0, 1} {
+			var bufs dwtBufs97
+			bufs.ensure(n)
+			data := make([]float64, n)
+			for i := range data {
+				data[i] = float64(i)
+			}
+			// It is the call that must not panic; what it computes is the
+			// business of the tests above.
+			synthesize1D_97_bufs(data, &bufs, cas)
+		}
+	}
+	// And the buffers ensure() hands out are big enough for either parity.
+	for _, n := range []int{1, 2, 3, 8, 9, 33} {
+		var bufs dwtBufs97
+		bufs.ensure(n)
+		half := (n + 1) / 2
+		if cap(bufs.low) < half || cap(bufs.high) < half {
+			t.Errorf("ensure(%d): low %d, high %d, want both at least %d",
+				n, cap(bufs.low), cap(bufs.high), half)
+		}
+	}
+}

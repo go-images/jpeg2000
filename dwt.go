@@ -37,13 +37,12 @@ type dwtBufs97 struct {
 
 // ensure grows the internal buffers to accommodate a signal of length n.
 func (b *dwtBufs97) ensure(n int) {
-	sn := (n + 1) / 2
-	dn := n - sn
-	if cap(b.low) < sn {
-		b.low = make([]float64, sn)
+	half := (n + 1) / 2
+	if cap(b.low) < half {
+		b.low = make([]float64, half)
 	}
-	if cap(b.high) < dn {
-		b.high = make([]float64, dn)
+	if cap(b.high) < half {
+		b.high = make([]float64, half)
 	}
 }
 
