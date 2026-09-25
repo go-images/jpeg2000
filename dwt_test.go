@@ -803,6 +803,154 @@ func BenchmarkSynthesize2D_MultiLevel(b *testing.B) {
 	}
 }
 
+// TestSynthesize2D_97_BlockTail. The vertical pass takes colBlock columns at a
+// time, so a width that is not a multiple of it ends on a short block -- and a
+// width below it never enters a full one. Neither may lose a column.
+//
+// The oracle is the loop the blocked one replaced: one column at a time. The
+// values are the same ones in the same order through the same 1D transform,
+// so the answer must be the same bit for bit, not merely close.
+func TestSynthesize2D_97_BlockTail(t *testing.T) {
+	for _, width := range []int{1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 33} {
+		for _, height := range []int{1, 2, 5, 8, 12} {
+			for _, levels := range []int{1, 2} {
+				if width>>levels == 0 || height>>levels == 0 {
+					continue
+				}
+				a := makeCoeffs(width, height)
+				b := makeCoeffs(width, height)
+				Synthesize2D_97(a, width, height, levels)
+				synthesize2D97OneColumnAtATime(b, width, height, levels)
+				for y := range a {
+					for x := range a[y] {
+						if a[y][x] != b[y][x] {
+							t.Fatalf("%dx%d levels=%d: at (%d,%d) blocked %v, one at a time %v",
+								width, height, levels, x, y, a[y][x], b[y][x])
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func makeCoeffs(width, height int) [][]float64 {
+	c := make([][]float64, height)
+	for y := range c {
+		c[y] = make([]float64, width)
+		for x := range c[y] {
+			// Values that are all different, and not representable as a short
+			// sum, so a column swapped for another one shows.
+			c[y][x] = float64(y*width+x)*1.0009765625 - 3
+		}
+	}
+	return c
+}
+
+// synthesize2D97OneColumnAtATime is the vertical pass as it was written before
+// it took columns in blocks, kept as the thing the blocked one has to agree
+// with.
+// synthesize2D97OneColumnAtATime is the vertical pass as it was written before
+// it took columns in blocks, kept as the thing the blocked one has to agree
+// with.
+func synthesize2D97OneColumnAtATime(coeffs [][]float64, width, height, levels int) {
+	if levels < 1 {
+		return
+	}
+	var bufs dwtBufs97
+	maxDim := max(width, height)
+	bufs.ensure(maxDim)
+	col := make([]float64, height)
+	for level := levels; level >= 1; level-- {
+		levelWidth := (width + (1 << (level - 1)) - 1) >> (level - 1)
+		levelHeight := (height + (1 << (level - 1)) - 1) >> (level - 1)
+		for y := range levelHeight {
+			synthesize1D_97_bufs(coeffs[y][:levelWidth], &bufs, 0)
+		}
+		for x := range levelWidth {
+			for y := range levelHeight {
+				col[y] = coeffs[y][x]
+			}
+			synthesize1D_97_bufs(col[:levelHeight], &bufs, 0)
+			for y := range levelHeight {
+				coeffs[y][x] = col[y]
+			}
+		}
+	}
+}
+
+// TestSynthesize2D_97_WithDims_BlockTail is the same check on the entry the
+// decoder actually calls, which carries its own resolution bounds and so its
+// own parity. A width that is not a multiple of colBlock ends on a short
+// block, and an odd origin makes the 1D pass start on the other phase.
+func TestSynthesize2D_97_WithDims_BlockTail(t *testing.T) {
+	for _, width := range []int{1, 3, 7, 8, 9, 17, 33} {
+		for _, height := range []int{2, 5, 12} {
+			for _, x0 := range []int{0, 1} {
+				for _, y0 := range []int{0, 1} {
+					half := ResBounds{X0: x0 / 2, Y0: y0 / 2,
+						Width: (width + 1) / 2, Height: (height + 1) / 2}
+					full := ResBounds{X0: x0, Y0: y0, Width: width, Height: height}
+					dims := []ResBounds{half, full}
+
+					a := makeCoeffs(width, height)
+					b := makeCoeffs(width, height)
+					Synthesize2D_97_WithDims(a, dims)
+					withDimsOneColumnAtATime(b, dims)
+					for y := range a {
+						for x := range a[y] {
+							if a[y][x] != b[y][x] {
+								t.Fatalf("%dx%d origin (%d,%d): at (%d,%d) blocked %v, one at a time %v",
+									width, height, x0, y0, x, y, a[y][x], b[y][x])
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// withDimsOneColumnAtATime is Synthesize2D_97_WithDims's vertical pass as it
+// was before it took columns in blocks.
+func withDimsOneColumnAtATime(coeffs [][]float64, resDims []ResBounds) {
+	levels := len(resDims) - 1
+	if levels < 1 {
+		return
+	}
+	maxDim := 0
+	for _, rd := range resDims {
+		if rd.Width > maxDim {
+			maxDim = rd.Width
+		}
+		if rd.Height > maxDim {
+			maxDim = rd.Height
+		}
+	}
+	var bufs dwtBufs97
+	bufs.ensure(maxDim)
+	col := make([]float64, maxDim)
+	for level := levels; level >= 1; level-- {
+		resIdx := levels - level + 1
+		levelWidth := resDims[resIdx].Width
+		levelHeight := resDims[resIdx].Height
+		casH := resDims[resIdx].X0 % 2
+		casV := resDims[resIdx].Y0 % 2
+		for y := range levelHeight {
+			synthesize1D_97_bufs(coeffs[y][:levelWidth], &bufs, casH)
+		}
+		for x := range levelWidth {
+			for y := range levelHeight {
+				col[y] = coeffs[y][x]
+			}
+			synthesize1D_97_bufs(col[:levelHeight], &bufs, casV)
+			for y := range levelHeight {
+				coeffs[y][x] = col[y]
+			}
+		}
+	}
+}
+
 // TestSynthesize97AtAnOddOriginWithAnOddSide pins the panic that
 // TestSynthesize2D_97_WithDims_BlockTail found by accident.
 //
