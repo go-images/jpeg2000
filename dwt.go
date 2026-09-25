@@ -259,6 +259,12 @@ func Synthesize2D_53_WithDims(coeffs [][]int32, resDims []ResBounds) {
 // JPEG2000 standard: forward is V→H (columns then rows), inverse is H→V (rows then columns)
 // width, height: dimensions of the full image
 // levels: number of decomposition levels
+// colBlock is how many columns the vertical pass of the 9/7 synthesis takes
+// at a time. Eight float64s are one cache line, which is the whole point: a
+// column of a [][]float64 is one value out of each row, so taking them one at
+// a time reads a line per row and uses an eighth of it.
+const colBlock = 8
+
 func Synthesize2D_97(coeffs [][]float64, width, height, levels int) {
 	if levels < 1 {
 		return
@@ -268,7 +274,7 @@ func Synthesize2D_97(coeffs [][]float64, width, height, levels int) {
 	var bufs dwtBufs97
 	maxDim := max(width, height)
 	bufs.ensure(maxDim)
-	col := make([]float64, height)
+	cols := make([]float64, colBlock*maxDim)
 
 	// Process from coarsest to finest level
 	for level := levels; level >= 1; level-- {
@@ -284,13 +290,25 @@ func Synthesize2D_97(coeffs [][]float64, width, height, levels int) {
 
 		// Vertical synthesis second (process columns)
 		// Undoes the first step of forward transform (which did vertical first)
-		for x := range levelWidth {
-			for y := range levelHeight {
-				col[y] = coeffs[y][x]
+		for x0 := 0; x0 < levelWidth; x0 += colBlock {
+			n := levelWidth - x0
+			if n > colBlock {
+				n = colBlock
 			}
-			synthesize1D_97_bufs(col[:levelHeight], &bufs, 0)
 			for y := range levelHeight {
-				coeffs[y][x] = col[y]
+				row := coeffs[y][x0 : x0+n]
+				for j, v := range row {
+					cols[j*maxDim+y] = v
+				}
+			}
+			for j := range n {
+				synthesize1D_97_bufs(cols[j*maxDim:j*maxDim+levelHeight], &bufs, 0)
+			}
+			for y := range levelHeight {
+				row := coeffs[y][x0 : x0+n]
+				for j := range row {
+					row[j] = cols[j*maxDim+y]
+				}
 			}
 		}
 	}
@@ -318,7 +336,7 @@ func Synthesize2D_97_WithDims(coeffs [][]float64, resDims []ResBounds) {
 	}
 	var bufs dwtBufs97
 	bufs.ensure(maxDim)
-	col := make([]float64, maxDim)
+	cols := make([]float64, colBlock*maxDim)
 
 	for level := levels; level >= 1; level-- {
 		resIdx := levels - level + 1
@@ -333,13 +351,25 @@ func Synthesize2D_97_WithDims(coeffs [][]float64, resDims []ResBounds) {
 			synthesize1D_97_bufs(coeffs[y][:levelWidth], &bufs, casH)
 		}
 
-		for x := range levelWidth {
-			for y := range levelHeight {
-				col[y] = coeffs[y][x]
+		for x0 := 0; x0 < levelWidth; x0 += colBlock {
+			n := levelWidth - x0
+			if n > colBlock {
+				n = colBlock
 			}
-			synthesize1D_97_bufs(col[:levelHeight], &bufs, casV)
 			for y := range levelHeight {
-				coeffs[y][x] = col[y]
+				row := coeffs[y][x0 : x0+n]
+				for j, v := range row {
+					cols[j*maxDim+y] = v
+				}
+			}
+			for j := range n {
+				synthesize1D_97_bufs(cols[j*maxDim:j*maxDim+levelHeight], &bufs, casV)
+			}
+			for y := range levelHeight {
+				row := coeffs[y][x0 : x0+n]
+				for j := range row {
+					row[j] = cols[j*maxDim+y]
+				}
 			}
 		}
 	}
