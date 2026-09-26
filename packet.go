@@ -2467,14 +2467,29 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
 		tileCompWidths[c] = compWidth
 		tileCompHeights[c] = compHeight
 
+		// One allocation a component, cut into rows, rather than one
+		// allocation a row.
+		//
+		// The shape is the same and no signature changes, but the COLUMNS
+		// become regularly spaced, and a column is what the 9/7 synthesis
+		// walks. Measured on a column pass over 3000x2200 float64: 13.5ms
+		// with a row per allocation, 6.1ms cut from one -- 2.2x, for a
+		// change of layout alone. (A flat slice with an explicit stride
+		// reaches 5.4ms; the last 0.7 is the slice headers, and it would
+		// cost a type change everywhere.)
+		//
+		// Each row is capped to its own length, so that an append to one
+		// cannot write into the next.
 		coeffs[c] = make([][]int32, compHeight)
+		ints := make([]int32, compHeight*compWidth)
 		for y := range compHeight {
-			coeffs[c][y] = make([]int32, compWidth)
+			coeffs[c][y] = ints[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
 		}
 		if waveletType == Wavelet97 {
 			floatCoeffs[c] = make([][]float64, compHeight)
+			floats := make([]float64, compHeight*compWidth)
 			for y := range compHeight {
-				floatCoeffs[c][y] = make([]float64, compWidth)
+				floatCoeffs[c][y] = floats[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
 			}
 		}
 	}

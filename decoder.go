@@ -252,9 +252,11 @@ func (d *Decoder) decodeTiles() error {
 		if compHeight < 1 {
 			compHeight = 1
 		}
+		// One allocation, cut into rows: see the note in packet.go.
 		d.components[c] = make([][]int32, compHeight)
+		back := make([]int32, compHeight*compWidth)
 		for y := 0; y < compHeight; y++ {
-			d.components[c][y] = make([]int32, compWidth)
+			d.components[c][y] = back[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
 		}
 	}
 
