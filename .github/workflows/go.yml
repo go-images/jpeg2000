@@ -54,3 +54,35 @@ jobs:
 
       - name: Run benchmarks
         run: go test -bench=. -benchmem -run=^$ ./...
+
+  # A JPEG 2000 decoder that only ever runs little-endian has not been tested
+  # where byte order matters. s390x is big-endian, and this package reads a
+  # codestream byte by byte and reassembles multi-byte numbers from it -- the
+  # exact shape in which an endianness assumption hides.
+  #
+  # And the SIMD kernels it calls through go-highway have a scalar FALLBACK for
+  # every architecture without a hand-written path. Until this lane existed,
+  # that fallback was never executed by anything: it was reached only on the
+  # machines nobody tested on.
+  #
+  # poppler needs a C++ toolchain, libopenjp2 and their dependencies built for
+  # each of these. This needs GOARCH.
+  arch-qemu:
+    name: arch ${{ matrix.goarch }} (qemu)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: riscv64, qemu: qemu-riscv64-static }
+          - { goarch: loong64, qemu: qemu-loongarch64-static }
+          - { goarch: ppc64le, qemu: qemu-ppc64le-static }
+          - { goarch: s390x,   qemu: qemu-s390x-static }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - name: Test under qemu (${{ matrix.goarch }})
+        run: GOARCH=${{ matrix.goarch }} go test -exec=${{ matrix.qemu }} ./...
