@@ -93,29 +93,45 @@ func synthesize1D_97_bufs(data []float64, bufs *dwtBufs97, cas int) {
 	doSynthesize97(data, bufs.low[:sn], bufs.high[:dn], cas)
 }
 
-// doSynthesize97 is the core 9/7 inverse transform implementation.
-// Operates entirely on float64, using SIMD-accelerated lifting and interleaving.
-// low and high are separate buffers (not aliases of data), so Interleave can
-// write directly into data without an intermediate out buffer.
-func doSynthesize97(data, low, high []float64, cas int) {
-	sn := len(low)
-	dn := len(high)
-
-	copy(low, data[:sn])
-	copy(high, data[sn:sn+dn])
-
-	// Inverse scaling per OpenJPEG's BUG_WEIRD_TWO_INVK approach:
-	// Low-pass *= K, High-pass *= 2/K (instead of standard 1/K).
-	wavelet.ScaleSlice(low, sn, lift97K)
-	wavelet.ScaleSlice(high, dn, lift97TwoInvK)
-
-	// Inverse lifting steps (SIMD-accelerated on float64)
-	// For update steps (target=low): phase = 1-cas
-	// For predict steps (target=high): phase = cas
+// lift97 applies the four inverse 9/7 lifting steps to two subbands that have
+// already been scaled. low and high must not overlap; each step writes one and
+// reads the other.
+//
+// For update steps (target=low) the phase is 1-cas; for predict steps
+// (target=high) it is cas.
+func lift97(low []float64, sn int, high []float64, dn int, cas int) {
 	wavelet.LiftStep97(low, sn, high, dn, lift97Delta, 1-cas)
 	wavelet.LiftStep97(high, dn, low, sn, lift97Gamma, cas)
 	wavelet.LiftStep97(low, sn, high, dn, lift97Beta, 1-cas)
 	wavelet.LiftStep97(high, dn, low, sn, lift97Alpha, cas)
+}
+
+// doSynthesize97 is the core 9/7 inverse transform implementation.
+// Operates entirely on float64, using SIMD-accelerated lifting and interleaving.
+// low and high are separate buffers (not aliases of data), so Interleave can
+// write directly into data without an intermediate out buffer.
+//
+// The inverse scaling is applied AS THE SUBBANDS ARE READ OUT rather than by a
+// pass of its own: a copy followed by `*= K` is the same single multiply as
+// `= data[i] * K`, so this is one pass over the data where it used to be two,
+// bit for bit. Profiled on the heaviest page of the corpus, the two copies alone
+// were 0.30s of runtime.memmove -- 5.6% of the page -- against 0.45s for all the
+// lifting arithmetic.
+//
+// Scaling per OpenJPEG's BUG_WEIRD_TWO_INVK approach: low-pass *= K, high-pass
+// *= 2/K rather than the standard 1/K.
+func doSynthesize97(data, low, high []float64, cas int) {
+	sn := len(low)
+	dn := len(high)
+
+	for i := range low {
+		low[i] = data[i] * lift97K
+	}
+	for i := range high {
+		high[i] = data[sn+i] * lift97TwoInvK
+	}
+
+	lift97(low, sn, high, dn, cas)
 
 	// Interleave directly into data (safe: low/high are separate copies)
 	wavelet.Interleave(data, low, sn, high, dn, cas)
@@ -351,24 +367,57 @@ func Synthesize2D_97_WithDims(coeffs [][]float64, resDims []ResBounds) {
 			synthesize1D_97_bufs(coeffs[y][:levelWidth], &bufs, casH)
 		}
 
+		// The vertical pass gathers a block of columns so that each one is
+		// contiguous, which is what lets the lifting kernels vectorise along a
+		// column. Two passes that used to sit between the gather and the scatter
+		// are folded into them:
+		//
+		//   the scaling, applied as each value is gathered, and
+		//   the interleave, applied as each value is scattered.
+		//
+		// Neither changes an arithmetic operation: the scaling is the same single
+		// multiply, and the interleave is a choice of which element to read.
+		// Profiled on the heaviest page of the corpus, those two passes cost
+		// 0.30s of memmove plus 0.40s in BaseInterleave -- against 0.45s for all
+		// the lifting. The interleave was running the package's pure-Go FALLBACK
+		// on arm64: the dispatcher there assigns every operation to the fallback
+		// and a later init replaces only the ones that have a C-derived assembly
+		// routine, which Interleave does not.
+		snV := (levelHeight + 1) / 2
+		dnV := levelHeight / 2
+		if casV != 0 {
+			snV, dnV = dnV, snV
+		}
 		for x0 := 0; x0 < levelWidth; x0 += colBlock {
 			n := levelWidth - x0
 			if n > colBlock {
 				n = colBlock
 			}
 			for y := range levelHeight {
+				scale := lift97K
+				if y >= snV {
+					scale = lift97TwoInvK
+				}
 				row := coeffs[y][x0 : x0+n]
 				for j, v := range row {
-					cols[j*maxDim+y] = v
+					cols[j*maxDim+y] = v * scale
 				}
 			}
 			for j := range n {
-				synthesize1D_97_bufs(cols[j*maxDim:j*maxDim+levelHeight], &bufs, casV)
+				col := cols[j*maxDim : j*maxDim+levelHeight]
+				lift97(col[:snV], snV, col[snV:levelHeight], dnV, casV)
 			}
+			// Destination row y takes low[y/2] when its parity matches the phase
+			// and high[y/2] otherwise, which is exactly what Interleave would
+			// have written into the column buffer first.
 			for y := range levelHeight {
+				off := y / 2
+				if (y%2 == 0) != (casV == 0) {
+					off += snV
+				}
 				row := coeffs[y][x0 : x0+n]
 				for j := range row {
-					row[j] = cols[j*maxDim+y]
+					row[j] = cols[j*maxDim+off]
 				}
 			}
 		}
