@@ -324,13 +324,13 @@ func convertToRGBA(components [][][]int32, width, height int,
 				// For n-bit to 8-bit: output = (val * 255 + maxVal/2) / maxVal
 				// This maps [0, 2^n-1] to [0, 255] correctly
 				if rBitDepth != 8 {
-					rVal = (rVal * 255 + rMaxVal/2) / rMaxVal
+					rVal = (rVal*255 + rMaxVal/2) / rMaxVal
 				}
 				if gBitDepth != 8 {
-					gVal = (gVal * 255 + gMaxVal/2) / gMaxVal
+					gVal = (gVal*255 + gMaxVal/2) / gMaxVal
 				}
 				if bBitDepth != 8 {
-					bVal = (bVal * 255 + bMaxVal/2) / bMaxVal
+					bVal = (bVal*255 + bMaxVal/2) / bMaxVal
 				}
 
 				idx := img.PixOffset(x, y)
@@ -570,4 +570,82 @@ func sameShape(a, b [][]int32) bool {
 		return false
 	}
 	return len(a[0]) == len(b[0])
+}
+
+// convertYCbCrInt32ToRGBA is convertToRGBAFloat's three-component path with the
+// intermediate images taken out.
+//
+// That path allocated SEVEN full float64 images for one page: three to hold the
+// int32 components as float64, one for the Y component with its offset added,
+// and three for the inverse transform's output on its way back out of the SIMD
+// images it was computed in. At 3000x2200 that is about 370MB asked for and
+// thrown away, and it showed as 38% of the time spent on the slowest page of
+// go-pdfkit's corpus.
+//
+// None of the seven is needed. The six SIMD images are POOLED -- reused from
+// one call to the next -- so the components can be written straight into them,
+// with the int32 to float64 conversion and the Y offset done during that one
+// pass, and the output read where the kernel left it.
+//
+// The transform itself is untouched: the same hwyimage.InverseICT over the same
+// values. What moves is only where they live.
+func convertYCbCrInt32ToRGBA(components [][][]int32, width, height int,
+	bitDepths []int) *image.RGBA {
+
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	bitDepth := func(c int) int {
+		if c < len(bitDepths) && bitDepths[c] > 0 {
+			return bitDepths[c]
+		}
+		return 8
+	}
+	scale := func(c int) float64 {
+		if bitDepth(c) == 8 {
+			return 1.0
+		}
+		return 255.0 / float64((uint(1)<<bitDepth(c))-1)
+	}
+
+	buf := getFloat64Buf(width, height)
+	defer putFloat64Buf(buf)
+
+	// The Y component carries the display offset BEFORE the inverse transform,
+	// which is why it cannot simply be copied: ITU-T T.800 G.1.2, and the same
+	// order the float path used.
+	yOffset := float64(uint(1) << (bitDepth(0) - 1))
+	for y := range height {
+		row := buf.imgs[0].Row(y)
+		src := components[0][y]
+		for x, v := range src {
+			row[x] = float64(v) + yOffset
+		}
+	}
+	for c := 1; c <= 2; c++ {
+		for y := range height {
+			row := buf.imgs[c].Row(y)
+			src := components[c][y]
+			for x, v := range src {
+				row[x] = float64(v)
+			}
+		}
+	}
+
+	hwyimage.InverseICT(buf.imgs[0], buf.imgs[1], buf.imgs[2],
+		buf.imgs[3], buf.imgs[4], buf.imgs[5])
+
+	rScale, gScale, bScale := scale(0), scale(1), scale(2)
+	for y := range height {
+		rRow := buf.imgs[3].Row(y)
+		gRow := buf.imgs[4].Row(y)
+		bRow := buf.imgs[5].Row(y)
+		idx := img.PixOffset(0, y)
+		for x := range width {
+			img.Pix[idx+0] = clampFloat(rRow[x] * rScale)
+			img.Pix[idx+1] = clampFloat(gRow[x] * gScale)
+			img.Pix[idx+2] = clampFloat(bRow[x] * bScale)
+			img.Pix[idx+3] = 255
+			idx += 4
+		}
+	}
+	return img
 }
