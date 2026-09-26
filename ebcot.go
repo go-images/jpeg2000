@@ -157,10 +157,10 @@ type ebcotDecoder struct {
 
 	// BYPASS segment tracking (when BYPASS without ERTERM)
 	// Each segment groups consecutive passes that share the same coding mode.
-	bypassSegments     []bypassSegment // Segment definitions (passCount, isRaw)
-	bypassSegmentIdx   int             // Current segment index
-	bypassPassInSeg    int             // Passes consumed in current segment
-	isBypassSegmented  bool            // True when using bypass segment mode
+	bypassSegments    []bypassSegment // Segment definitions (passCount, isRaw)
+	bypassSegmentIdx  int             // Current segment index
+	bypassPassInSeg   int             // Passes consumed in current segment
+	isBypassSegmented bool            // True when using bypass segment mode
 
 	// Subband type (for debug logging)
 	subbandType SubbandType
@@ -427,10 +427,11 @@ func (e *ebcotDecoder) getSegmentData(passIndex int) []byte {
 // AFTER each pass completes, matching OpenJPEG's t1.c behavior.
 //
 // OpenJPEG's decoding order for ERTERM:
-//   For each segment (1 pass per segment in ERTERM mode):
-//     1. opj_mqc_init_dec(segment_data)  - Initialize decoder state (A, C, CT)
-//     2. Process pass (sig/ref/cln)
-//     3. if RESET: opj_mqc_resetstates() - Reset contexts AFTER pass
+//
+//	For each segment (1 pass per segment in ERTERM mode):
+//	  1. opj_mqc_init_dec(segment_data)  - Initialize decoder state (A, C, CT)
+//	  2. Process pass (sig/ref/cln)
+//	  3. if RESET: opj_mqc_resetstates() - Reset contexts AFTER pass
 //
 // NOTE: For pass 0, the MQ decoder was already initialized with Reset() in
 // DecodeCodeBlock (which both resets contexts AND initializes decoder state).
@@ -559,18 +560,18 @@ const (
 // BYPASS mode: Raw coding passes (SPP/MRP on lower bitplanes) use a separate
 // raw bit decoder that handles 0xFF byte stuffing differently from MQ coding.
 // Per ITU-T T.800 and OpenJPEG, raw passes must:
-//   1. Start from a byte boundary (after MQ cleanup terminates)
-//   2. Handle 0xFF stuffing (only 7 bits after 0xFF)
-//   3. Sync back to MQ position before next cleanup pass
+//  1. Start from a byte boundary (after MQ cleanup terminates)
+//  2. Handle 0xFF stuffing (only 7 bits after 0xFF)
+//  3. Sync back to MQ position before next cleanup pass
 //
 // OpenJPEG conformance: This function matches the order of operations in
 // OpenJPEG's t1.c opj_t1_decode_cblk for ERTERM and RESET handling:
 //
-//   For each segment (outer loop):
-//     opj_mqc_init_dec(segment_data)
-//     For each pass in segment (inner loop - 1 pass for ERTERM):
-//       Process pass (sigpass, refpass, or clnpass)
-//       if (RESET && MQ mode): opj_mqc_resetstates()  // Reset AFTER pass
+//	For each segment (outer loop):
+//	  opj_mqc_init_dec(segment_data)
+//	  For each pass in segment (inner loop - 1 pass for ERTERM):
+//	    Process pass (sigpass, refpass, or clnpass)
+//	    if (RESET && MQ mode): opj_mqc_resetstates()  // Reset AFTER pass
 //
 // The RESET context reset happens AFTER each pass completes, not before.
 // This ensures contexts are in initial state when the NEXT pass begins.
@@ -1222,8 +1223,12 @@ func (e *ebcotDecoder) getSignContext(x, y int, vscLastRow bool) (int, int) {
 
 	var lu int
 
+	// The current row is bound once, as in countSigNeighbors: three of the four
+	// neighbours read here live on it or on the row above.
+	cur := e.state[y]
+
 	// West neighbor (x-1)
-	westState := e.state[y][x-1]
+	westState := cur[x-1]
 	if westState&flagSignificant != 0 {
 		lu |= lutSigW
 		if westState&flagSign != 0 {
@@ -1232,7 +1237,7 @@ func (e *ebcotDecoder) getSignContext(x, y int, vscLastRow bool) (int, int) {
 	}
 
 	// East neighbor (x+1)
-	eastState := e.state[y][x+1]
+	eastState := cur[x+1]
 	if eastState&flagSignificant != 0 {
 		lu |= lutSigE
 		if eastState&flagSign != 0 {
@@ -1287,11 +1292,12 @@ func (e *ebcotDecoder) hasSignificantNeighbor(x, y int, vscLastRow bool) bool {
 		return e.state[y][x]&flagNeighborSig != 0
 	}
 	// VSC last row: check all neighbors except south row
-	return e.state[y][x-1]&flagSignificant != 0 || // West
-		e.state[y][x+1]&flagSignificant != 0 || // East
-		e.state[y-1][x]&flagSignificant != 0 || // North
-		e.state[y-1][x-1]&flagSignificant != 0 || // Northwest
-		e.state[y-1][x+1]&flagSignificant != 0 // Northeast
+	cur, north := e.state[y], e.state[y-1]
+	return cur[x-1]&flagSignificant != 0 || // West
+		cur[x+1]&flagSignificant != 0 || // East
+		north[x]&flagSignificant != 0 || // North
+		north[x-1]&flagSignificant != 0 || // Northwest
+		north[x+1]&flagSignificant != 0 // Northeast
 }
 
 // setSignificant marks coefficient as significant and sets initial magnitude.
@@ -1322,23 +1328,27 @@ func (e *ebcotDecoder) setSignificant(x, y int, bp int, vscFirstRow bool) {
 	// Propagate neighbor significance to neighbors.
 	// Matches OpenJPEG's opj_t1_update_flags_macro.
 
+	// Rows bound once, as in the readers: eight writes across three rows.
+	cur, south := e.state[y], e.state[y+1]
+
 	// Horizontal neighbors (always propagated)
-	e.state[y][x-1] |= flagNeighborSig // West
-	e.state[y][x+1] |= flagNeighborSig // East
+	cur[x-1] |= flagNeighborSig // West
+	cur[x+1] |= flagNeighborSig // East
 
 	// South neighbors (always propagated)
-	e.state[y+1][x] |= flagNeighborSig   // South
-	e.state[y+1][x-1] |= flagNeighborSig // Southwest
-	e.state[y+1][x+1] |= flagNeighborSig // Southeast
+	south[x] |= flagNeighborSig   // South
+	south[x-1] |= flagNeighborSig // Southwest
+	south[x+1] |= flagNeighborSig // Southeast
 
 	// North neighbors: skip when VSC enabled at first row of stripe.
 	// Per OpenJPEG: "if (ci == 0U && !(vsc))" — only propagate north when
 	// NOT at first row of stripe with VSC. This prevents the previous stripe's
 	// last row from seeing this stripe's first row as a significant south neighbor.
 	if !vscFirstRow {
-		e.state[y-1][x] |= flagNeighborSig   // North
-		e.state[y-1][x-1] |= flagNeighborSig // Northwest
-		e.state[y-1][x+1] |= flagNeighborSig // Northeast
+		north := e.state[y-1]
+		north[x] |= flagNeighborSig   // North
+		north[x-1] |= flagNeighborSig // Northwest
+		north[x+1] |= flagNeighborSig // Northeast
 	}
 }
 
@@ -1346,36 +1356,45 @@ func (e *ebcotDecoder) setSignificant(x, y int, bp int, vscFirstRow bool) {
 // Returns (horizontal, vertical, diagonal).
 // When vscLastRow is true (VSC at last row of stripe), south neighbors are excluded.
 func (e *ebcotDecoder) countSigNeighbors(x, y int, vscLastRow bool) (h, v, d int) {
+	// The three rows are bound once. e.state is [][]uint8, so every
+	// e.state[y][x] is two bounds checks and a pointer load, and this function
+	// does EIGHT of them per coefficient -- it is the largest single item in
+	// the significance propagation pass, ahead of the arithmetic decoder it
+	// feeds. Binding the rows leaves one bounds check each and reuses the
+	// pointers. Nothing about the arithmetic changes.
+	north := e.state[y-1]
+	cur := e.state[y]
+
 	// Horizontal neighbors
-	if e.state[y][x-1]&flagSignificant != 0 {
+	if cur[x-1]&flagSignificant != 0 {
 		h++
 	}
-	if e.state[y][x+1]&flagSignificant != 0 {
+	if cur[x+1]&flagSignificant != 0 {
 		h++
 	}
 
 	// Vertical neighbors
-	if e.state[y-1][x]&flagSignificant != 0 {
+	if north[x]&flagSignificant != 0 {
 		v++
-	}
-	if !vscLastRow {
-		if e.state[y+1][x]&flagSignificant != 0 {
-			v++
-		}
 	}
 
 	// Diagonal neighbors (north always, south only if not VSC last row)
-	if e.state[y-1][x-1]&flagSignificant != 0 {
+	if north[x-1]&flagSignificant != 0 {
 		d++
 	}
-	if e.state[y-1][x+1]&flagSignificant != 0 {
+	if north[x+1]&flagSignificant != 0 {
 		d++
 	}
+
 	if !vscLastRow {
-		if e.state[y+1][x-1]&flagSignificant != 0 {
+		south := e.state[y+1]
+		if south[x]&flagSignificant != 0 {
+			v++
+		}
+		if south[x-1]&flagSignificant != 0 {
 			d++
 		}
-		if e.state[y+1][x+1]&flagSignificant != 0 {
+		if south[x+1]&flagSignificant != 0 {
 			d++
 		}
 	}
