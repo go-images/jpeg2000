@@ -656,6 +656,12 @@ func (d *Decoder) toImageUpsampled() *image.RGBA {
 	useICT := needsTransform && (!reversible || d.needsICTForYCbCr())
 
 	if useICT {
+		// Three components go through the fused path, which writes them into
+		// the pooled SIMD images and reads the transform's output where the
+		// kernel left it: seven full float64 images of a page, gone.
+		if d.header.NumComps == 3 {
+			return convertYCbCrInt32ToRGBA(d.components, width, height, d.header.BitDepth)
+		}
 		// Apply ICT using float components
 		floatComps := make([][][]float64, d.header.NumComps)
 		for c := 0; c < d.header.NumComps; c++ {
@@ -809,6 +815,12 @@ func (d *Decoder) toImage() *image.RGBA {
 	useICT := needsTransform && (!reversible || d.needsICTForYCbCr())
 
 	if useICT {
+		// Three components go through the fused path, which writes them into
+		// the pooled SIMD images and reads the transform's output where the
+		// kernel left it: seven full float64 images of a page, gone.
+		if d.header.NumComps == 3 {
+			return convertYCbCrInt32ToRGBA(d.components, width, height, d.header.BitDepth)
+		}
 		// Apply ICT using float components
 		floatComps := make([][][]float64, d.header.NumComps)
 		for c := 0; c < d.header.NumComps; c++ {

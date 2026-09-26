@@ -2,6 +2,7 @@ package jpeg2000
 
 import (
 	"math"
+	"math/rand"
 	"testing"
 )
 
@@ -308,8 +309,8 @@ func TestConvertToRGBAFloat_Grayscale(t *testing.T) {
 	// To get pixel value P, coefficient = P - 128 (for 8-bit unsigned)
 	components := [][][]float64{
 		{
-			{-128.0, 0.5},   // pixel 0, pixel 128.5 → 129
-			{127.0, -63.7},  // pixel 255, pixel 64.3 → 64
+			{-128.0, 0.5},  // pixel 0, pixel 128.5 → 129
+			{127.0, -63.7}, // pixel 255, pixel 64.3 → 64
 		},
 	}
 
@@ -343,9 +344,9 @@ func TestConvertToRGBAFloat_ICT(t *testing.T) {
 	// Create simple YCbCr values and convert with ICT
 	// Input coefficients are signed: to get pixel 128, coefficient = 128 - 128 = 0
 	components := [][][]float64{
-		{{0.0}},   // Y: pixel 128
-		{{0.0}},   // Cb: neutral
-		{{0.0}},   // Cr: neutral
+		{{0.0}}, // Y: pixel 128
+		{{0.0}}, // Cb: neutral
+		{{0.0}}, // Cr: neutral
 	}
 
 	img := convertToRGBAFloat(components, 1, 1, []int{8, 8, 8}, []bool{false, false, false})
@@ -438,4 +439,59 @@ func approxEqual2D(a, b [][]float64, tolerance float64) bool {
 		}
 	}
 	return true
+}
+
+// TestFusedICTMatchesTheFloatPath. convertYCbCrInt32ToRGBA is
+// convertToRGBAFloat's three-component path with seven intermediate float64
+// images taken out. What it must produce is the same PIXELS -- every byte --
+// because the only thing that changed is where the numbers live.
+//
+// The oracle is the path it replaces, called the way toImage called it: build
+// [][][]float64 from the int32 components, then convertToRGBAFloat.
+func TestFusedICTMatchesTheFloatPath(t *testing.T) {
+	rnd := rand.New(rand.NewSource(11))
+	for _, dim := range [][2]int{{1, 1}, {3, 2}, {8, 8}, {9, 7}, {17, 13}, {64, 40}} {
+		w, h := dim[0], dim[1]
+		for _, depth := range []int{8, 10, 12, 16} {
+			lim := int32(1) << (depth - 1)
+			comps := make([][][]int32, 3)
+			for c := range comps {
+				comps[c] = make([][]int32, h)
+				for y := range comps[c] {
+					comps[c][y] = make([]int32, w)
+					for x := range comps[c][y] {
+						// The whole signed range a component can hold, so that
+						// the clamping at both ends is exercised.
+						comps[c][y][x] = rnd.Int31n(2*lim) - lim
+					}
+				}
+			}
+			depths := []int{depth, depth, depth}
+
+			// The path it replaces.
+			floats := make([][][]float64, 3)
+			for c := range floats {
+				floats[c] = make([][]float64, h)
+				for y := range floats[c] {
+					floats[c][y] = make([]float64, w)
+					for x := range floats[c][y] {
+						floats[c][y][x] = float64(comps[c][y][x])
+					}
+				}
+			}
+			want := convertToRGBAFloat(floats, w, h, depths, []bool{false, false, false})
+			got := convertYCbCrInt32ToRGBA(comps, w, h, depths)
+
+			if len(got.Pix) != len(want.Pix) {
+				t.Fatalf("%dx%d depth %d: %d bytes against %d", w, h, depth, len(got.Pix), len(want.Pix))
+			}
+			for i := range want.Pix {
+				if got.Pix[i] != want.Pix[i] {
+					px := i / 4
+					t.Fatalf("%dx%d depth %d: pixel (%d,%d) byte %d: fused %d, float path %d",
+						w, h, depth, px%w, px/w, i%4, got.Pix[i], want.Pix[i])
+				}
+			}
+		}
+	}
 }
