@@ -2786,9 +2786,19 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 								// For 9/7 wavelet: store full-precision float64 for DWT.
 								// Rounding to int32 before DWT loses fractional precision
 								// that accumulates into errors of 2-7 levels.
+								//
+								// And ONLY there. The int32 plane is not read on this
+								// path: the transform runs on the float64 one and then
+								// writes every element of the int32 one back from it, so
+								// a value rounded here is overwritten before anything
+								// looks at it. Rounding it was a dead store -- on a
+								// 9 449 by 13 701 page, 129.5 MILLION RoundToEven calls
+								// and 518 MB of writes into memory that is about to be
+								// filled again.
 								floatCoeffs[imgY][imgX] = coeff
+							} else {
+								coeffs[imgY][imgX] = int32(math.RoundToEven(coeff))
 							}
-							coeffs[imgY][imgX] = int32(math.RoundToEven(coeff))
 						}
 					}
 				}
