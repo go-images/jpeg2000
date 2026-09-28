@@ -189,3 +189,109 @@ func TestEachWorkerGetsItsOwnDecoder(t *testing.T) {
 		t.Errorf("asking for 0 decoders gave %d, want 1", got)
 	}
 }
+
+// TestASubsampledComponentIsReadTheWayGetComponentSampleReadIt.
+//
+// newSampler resolves subsampling once per row where getComponentSample resolved it
+// per pixel, and the two must agree exactly -- a nearest-neighbour map is easy to
+// shift by one and a shifted chroma plane is a picture with coloured edges, not a
+// crash.
+func TestASubsampledComponentIsReadTheWayGetComponentSampleReadIt(t *testing.T) {
+	// Every shape that matters: full size, halved in each direction, halved in
+	// both, an odd output, and a component LARGER than the output.
+	for _, tc := range []struct{ compW, compH, outW, outH int }{
+		{8, 8, 8, 8},
+		{4, 8, 8, 8},
+		{8, 4, 8, 8},
+		{4, 4, 8, 8},
+		{3, 5, 7, 11},
+		{16, 16, 8, 8},
+		{1, 1, 5, 5},
+	} {
+		comp := make([][]int32, tc.compH)
+		for y := range comp {
+			comp[y] = make([]int32, tc.compW)
+			for x := range comp[y] {
+				comp[y][x] = int32(y*tc.compW + x)
+			}
+		}
+		s := newSampler(comp, tc.outW, tc.outH)
+		for y := 0; y < tc.outH; y++ {
+			row := s.row(y)
+			for x := 0; x < tc.outW; x++ {
+				want := getComponentSample(comp, x, y, tc.outW, tc.outH)
+				if got := s.at(row, x); got != want {
+					t.Fatalf("comp %dx%d into %dx%d at (%d,%d): sampler %d, getComponentSample %d",
+						tc.compW, tc.compH, tc.outW, tc.outH, x, y, got, want)
+				}
+			}
+		}
+	}
+}
+
+// TestAnEmptyComponentReadsAsZero, which is what getComponentSample answered and
+// what a nil row has to keep answering.
+func TestAnEmptyComponentReadsAsZero(t *testing.T) {
+	for _, comp := range [][][]int32{nil, {}, {{}}} {
+		s := newSampler(comp, 4, 4)
+		row := s.row(0)
+		if row != nil {
+			t.Errorf("an empty component gave a row of %d", len(row))
+		}
+		if got := s.at(row, 2); got != 0 {
+			t.Errorf("an empty component read %d, want 0", got)
+		}
+		if want := getComponentSample(comp, 2, 0, 4, 4); want != 0 {
+			t.Errorf("getComponentSample says %d for an empty component", want)
+		}
+	}
+}
+
+// TestARowReadTwiceIsExpandedOnce. The expansion buffer is reused, so asking for
+// the same row again must give the same answer rather than a half-written one.
+func TestARowReadTwiceIsExpandedOnce(t *testing.T) {
+	comp := [][]int32{{10, 20}, {30, 40}}
+	s := newSampler(comp, 4, 4)
+	first := append([]int32(nil), s.row(1)...)
+	second := s.row(1)
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("row 1 read twice gave %v then %v", first, second)
+		}
+	}
+	// And a different row must not return the previous one.
+	other := s.row(3)
+	if len(other) == len(first) && other[0] == first[0] && comp[1][0] != comp[0][0] {
+		// rows 1 and 3 map to component rows 0 and 1, so they differ
+		t.Errorf("row 3 gave row 1's contents %v", other)
+	}
+}
+
+// TestARaggedComponentDoesNotPanic. A component's rows all have the same length in
+// any file this decoder writes, and compW is read from the first of them -- so a
+// file whose later rows are shorter would index past the end. getComponentSample
+// clamped against the FIRST row's width and would have panicked; at() asks the row
+// it was given.
+func TestARaggedComponentDoesNotPanic(t *testing.T) {
+	comp := [][]int32{
+		{1, 2, 3, 4},
+		{5, 6}, // short
+		{7, 8, 9, 10},
+		{}, // empty
+	}
+	s := newSampler(comp, 4, 4)
+	for y := 0; y < 4; y++ {
+		row := s.row(y)
+		for x := 0; x < 4; x++ {
+			s.at(row, x) // must not panic
+		}
+	}
+	// And the short row reads its last sample rather than something else's.
+	if got := s.at(s.row(1), 3); got != 6 {
+		t.Errorf("past the end of a short row gave %d, want its last sample 6", got)
+	}
+	// An empty row inside a non-empty component gives zero rather than panicking.
+	if got := s.at(s.row(3), 0); got != 0 {
+		t.Errorf("an empty row gave %d, want 0", got)
+	}
+}
