@@ -3,6 +3,8 @@ package jpeg2000
 import (
 	"fmt"
 	"math"
+	"sync"
+	"sync/atomic"
 )
 
 // Packet represents a single quality layer packet for a precinct
@@ -2501,8 +2503,13 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
 		maxCBW = max(maxCBW, w)
 		maxCBH = max(maxCBH, ht)
 	}
-	ebcot := newEBCOTDecoder(maxCBW, maxCBH)
-	if ebcot == nil {
+	// One decoder per worker. A code block is independent of every other by
+	// construction -- ITU-T T.800 makes that a property of the format, not an
+	// assumption about a file -- and DecodeCodeBlock touches nothing but its own
+	// receiver, so the only thing a second goroutine needs is a second receiver.
+	// One holds about 22 KB of state at the usual 64 by 64 block size.
+	ebcots := newEBCOTDecoders(ebcotWorkers(), maxCBW, maxCBH)
+	if len(ebcots) == 0 {
 		return nil, nil, fmt.Errorf("failed to create EBCOT decoder")
 	}
 
@@ -2517,7 +2524,7 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
 				if floatCoeffs != nil {
 					fc = floatCoeffs[c]
 				}
-				if err := td.decodeSubband(sb, coeffs[c], fc, ebcot, r, c, tileCompWidths[c], tileCompHeights[c]); err != nil {
+				if err := td.decodeSubband(sb, coeffs[c], fc, ebcots, r, c, tileCompWidths[c], tileCompHeights[c]); err != nil {
 					// Continue on error - partial decode is better than nothing
 					continue
 				}
@@ -2532,7 +2539,7 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
 // tileCompWidth and tileCompHeight are the tile-component dimensions (for multi-tile images).
 // floatCoeffs is non-nil for 9/7 wavelet: dequantized values are stored with full float64
 // precision (no rounding), for use by the DWT synthesis.
-func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs [][]float64, ebcot *ebcotDecoder, res int, comp int, tileCompWidth, tileCompHeight int) error {
+func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs [][]float64, ebcots []*ebcotDecoder, res int, comp int, tileCompWidth, tileCompHeight int) error {
 	h := td.header
 
 	// Code block grid parameters for coefficient placement.
@@ -2557,65 +2564,40 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 	gridX0 := sb.X0 / cbWidth
 	gridY0 := sb.Y0 / cbHeight
 
+	// Everything from here to the loop depends on (comp, res, sb.Type) and not on
+	// which code block is being decoded, so it is computed ONCE. It used to be
+	// computed per block -- two copies of the same subband-offset switch, the
+	// quantisation tables, the bit depth, and two math.Pow for the step size --
+	// and a 2533 by 3590 image has some 2 200 blocks in a subband.
+	inv := td.subbandConstants(sb, res, comp)
+	style := td.getCodeBlockStyle()
+
+	// The blocks that carry data, gathered first so the work can be handed out.
+	type at struct{ x, y int }
+	todo := make([]at, 0, sb.CodeBlocksY*sb.CodeBlocksX)
 	for y := 0; y < sb.CodeBlocksY; y++ {
 		for x := 0; x < sb.CodeBlocksX; x++ {
 			cb := sb.CodeBlocks[y][x]
-
 			if cb.IncludedLayer < 0 || len(cb.Data) == 0 {
 				continue
 			}
+			todo = append(todo, at{x, y})
+		}
+	}
+	if len(todo) == 0 {
+		return nil
+	}
 
-			// Calculate Mb (number of magnitude bit planes) for this subband
-			// Use tile-specific QCD if present, then per-component QCC, then main header QCD.
-			var mbExponents []int
-			guardBits := h.GuardBits
-			if td.tile.HasTileQCD {
-				mbExponents = td.tile.TileExponents
-				guardBits = td.tile.TileGuardBits
-			} else if h.CompExponents != nil && comp < len(h.CompExponents) && h.CompExponents[comp] != nil {
-				mbExponents = h.CompExponents[comp]
-			} else if h.OriginalExponents != nil {
-				mbExponents = h.OriginalExponents
-			} else {
-				mbExponents = h.Exponents
-			}
-			mb := 8 // Default for 8-bit data without guard bits
-			expIdx := 0
-			if len(mbExponents) > 0 {
-				if res == 0 && sb.Type == SubbandLL {
-					expIdx = 0
-				} else if res > 0 {
-					subbandOffset := 0
-					switch sb.Type {
-					case SubbandHL:
-						subbandOffset = 0
-					case SubbandLH:
-						subbandOffset = 1
-					case SubbandHH:
-						subbandOffset = 2
-					}
-					expIdx = 1 + 3*(res-1) + subbandOffset
-				}
-				if expIdx < len(mbExponents) {
-					mb = guardBits + mbExponents[expIdx] - 1
-				} else if len(mbExponents) == 1 {
-					baseExp := mbExponents[0]
-					var derivedExp int
-					if res == 0 {
-						derivedExp = baseExp
-					} else {
-						derivedExp = baseExp - (res - 1)
-					}
-					mb = guardBits + derivedExp - 1
-				}
-			}
+	// one decodes a single code block into coeffs. Two of these may run at once
+	// on different blocks: each takes its own ebcotDecoder, and the blocks of a
+	// subband occupy DISJOINT rectangles, so no two ever write the same cell.
+	one := func(ebcot *ebcotDecoder, x, y int) {
+		{
+			cb := sb.CodeBlocks[y][x]
 
-			// Add ROI shift to Mb calculation
-			roiShift := 0
-			if comp < len(td.tile.ROIShift) {
-				roiShift = td.tile.ROIShift[comp]
-			}
-			mb += roiShift
+			// Only the last adjustment is per block; the rest came from inv.
+			mb := inv.mb
+			roiShift := inv.roiShift
 
 			if cb.TotalPasses > 0 {
 				minStartBP := (cb.TotalPasses - 1 + 2) / 3 // round up
@@ -2634,12 +2616,15 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 				NumPasses:          cb.TotalPasses,
 				ZeroBitPlanes:      cb.ZeroBitPlanes,
 				MagnitudeBitPlanes: mb,
-				CodeBlockStyle:     td.getCodeBlockStyle(),
+				CodeBlockStyle:     style,
 				SegmentLengths:     cb.SegmentLengths,
 			}
 			blockCoeffs, err := ebcot.DecodeCodeBlock(codeBlock, sb.Type)
 			if err != nil {
-				continue
+				// A block that will not decode leaves its rectangle as it was.
+				// Partial output beats none, which is what the loop this came
+				// from said with `continue`.
+				return
 			}
 
 			// Apply ROI de-shifting to raw quantization indices BEFORE dequantization.
@@ -2663,93 +2648,7 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 				}
 			}
 
-			// Determine step size for dequantization scaling
-			stepIdx := 0
-			if res == 0 && sb.Type == SubbandLL {
-				stepIdx = 0
-			} else if res > 0 {
-				subbandOffset := 0
-				switch sb.Type {
-				case SubbandHL:
-					subbandOffset = 0
-				case SubbandLH:
-					subbandOffset = 1
-				case SubbandHH:
-					subbandOffset = 2
-				}
-				stepIdx = 1 + 3*(res-1) + subbandOffset
-			}
-
-			var compExponents, compMantissas []int
-			if td.tile.HasTileQCD {
-				// Tile-specific QCD overrides everything
-				compExponents = td.tile.TileExponents
-				compMantissas = td.tile.TileMantissas
-			} else if h.CompQuantStyle != nil && comp < len(h.CompQuantStyle) && h.CompQuantStyle[comp] != 255 {
-				if h.CompExponents != nil && comp < len(h.CompExponents) {
-					compExponents = h.CompExponents[comp]
-				}
-				if h.CompMantissas != nil && comp < len(h.CompMantissas) {
-					compMantissas = h.CompMantissas[comp]
-				}
-			} else {
-				compExponents = h.OriginalExponents
-				compMantissas = h.OriginalMantissas
-				if compExponents == nil {
-					compExponents = h.Exponents
-				}
-				if compMantissas == nil {
-					compMantissas = h.Mantissas
-				}
-			}
-
-			bitDepth := 8
-			if comp < len(h.BitDepth) {
-				bitDepth = h.BitDepth[comp]
-			}
-
-			// Rb is the nominal dynamic range of the subband.
-			// Per ITU-T T.800 Table E.1: Rb = bitDepth + gain_b
-			// For 9/7 wavelet: use gain=0 for ALL subbands (OpenJPEG BUG_WEIRD_TWO_INVK).
-			// The DWT uses 2/K instead of 1/K for high-pass scaling to compensate.
-			// For 5/3 wavelet: use standard gains (0 for LL, 1 for HL/LH, 2 for HH).
-			Rb := bitDepth
-			waveletType := td.getWaveletFilter()
-			if waveletType == Wavelet53 {
-				switch sb.Type {
-				case SubbandHL, SubbandLH:
-					Rb += 1
-				case SubbandHH:
-					Rb += 2
-				}
-			}
-			// For Wavelet97: gain=0 for all subbands (Rb = bitDepth)
-
-			// Formula per ITU-T T.800 E.1.1: stepSize = (1 + mant/2048) * 2^(Rb - exp)
-			stepSize := 1.0
-			if len(compExponents) > 0 {
-				if stepIdx < len(compExponents) {
-					exp := compExponents[stepIdx]
-					mant := 0
-					if stepIdx < len(compMantissas) {
-						mant = compMantissas[stepIdx]
-					}
-					stepSize = (1.0 + float64(mant)/2048.0) * math.Pow(2, float64(Rb-exp))
-				} else if len(compExponents) == 1 {
-					baseExp := compExponents[0]
-					baseMant := 0
-					if len(compMantissas) > 0 {
-						baseMant = compMantissas[0]
-					}
-					var derivedExp int
-					if res == 0 {
-						derivedExp = baseExp
-					} else {
-						derivedExp = baseExp - (res - 1)
-					}
-					stepSize = (1.0 + float64(baseMant)/2048.0) * math.Pow(2, float64(Rb-derivedExp))
-				}
-			}
+			stepSize := inv.stepSize
 
 			// Place coefficients in output array.
 			// Per ITU-T T.800 B.7, code block (x,y) maps to absolute grid cell
@@ -2758,20 +2657,28 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 			startX := max((gridX0+x)*cbWidth-sb.X0, 0)
 			startY := max((gridY0+y)*cbHeight-sb.Y0, 0)
 
+			// The position is a CONSTANT offset per subband, and the choice between
+			// the reversible and the lossy path is a property of the codestream.
+			// Both used to be settled inside the innermost loop: one function call
+			// with two slice bounds checks and a switch, and one branch over two
+			// fields, per COEFFICIENT. This page carries 9.1 million of them twice.
 			for cy := 0; cy < cb.Height; cy++ {
+				imgY := inv.offY + startY + cy
+				if imgY < 0 || imgY >= tileCompHeight {
+					continue
+				}
+				rowInt := coeffs[imgY]
+				var rowFloat []float64
+				if floatCoeffs != nil {
+					rowFloat = floatCoeffs[imgY]
+				}
+				blockRow := blockCoeffs[cy]
 				for cx := 0; cx < cb.Width; cx++ {
-					imgX, imgY := td.getCoeffPositionForTile(sb.Type, res, startX+cx, startY+cy, comp)
-					if imgX >= 0 && imgX < tileCompWidth && imgY >= 0 && imgY < tileCompHeight {
-						// Dequantization:
-						// - Reversible 5/3 (QuantStyle=0): always divide by 2 (truncation).
-						// - Irreversible 9/7 or Scaled 5/3: multiply by stepSize and round.
-						quantStyle := h.QuantStyle
-						if td.tile.HasTileQCD {
-							quantStyle = td.tile.TileQuantStyle
-						}
-						if waveletType == Wavelet53 && quantStyle == 0 {
+					imgX := inv.offX + startX + cx
+					if imgX >= 0 && imgX < tileCompWidth {
+						if inv.reversible {
 							// Reversible 5/3: integer division by 2 (truncation toward zero)
-							coeffs[imgY][imgX] = blockCoeffs[cy][cx] / 2
+							rowInt[imgX] = blockRow[cx] / 2
 						} else {
 							// Lossy (9/7 or Scaled 5/3): floating-point dequantization.
 							//
@@ -2781,8 +2688,8 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 							// MSB, and the least significant coded bit represents 2^1, not 2^0.
 							// We divide by 2 to convert to the true quantization index before
 							// multiplying by step size.
-							coeff := float64(blockCoeffs[cy][cx]) * stepSize / 2.0
-							if floatCoeffs != nil {
+							coeff := float64(blockRow[cx]) * stepSize / 2.0
+							if rowFloat != nil {
 								// For 9/7 wavelet: store full-precision float64 for DWT.
 								// Rounding to int32 before DWT loses fractional precision
 								// that accumulates into errors of 2-7 levels.
@@ -2795,9 +2702,9 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 								// 9 449 by 13 701 page, 129.5 MILLION RoundToEven calls
 								// and 518 MB of writes into memory that is about to be
 								// filled again.
-								floatCoeffs[imgY][imgX] = coeff
+								rowFloat[imgX] = coeff
 							} else {
-								coeffs[imgY][imgX] = int32(math.RoundToEven(coeff))
+								rowInt[imgX] = int32(math.RoundToEven(coeff))
 							}
 						}
 					}
@@ -2806,6 +2713,32 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 		}
 	}
 
+	// Serial when there is little to hand out: a goroutine costs about a
+	// microsecond to start and the smallest subbands hold one or two blocks.
+	if len(ebcots) < 2 || len(todo) < 4 {
+		for _, t := range todo {
+			one(ebcots[0], t.x, t.y)
+		}
+		return nil
+	}
+
+	workers := min(len(ebcots), len(todo))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(e *ebcotDecoder) {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(todo) {
+					return
+				}
+				one(e, todo[i].x, todo[i].y)
+			}
+		}(ebcots[w])
+	}
+	wg.Wait()
 	return nil
 }
 
