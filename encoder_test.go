@@ -285,8 +285,24 @@ func TestDWT2D_97_RoundTrip(t *testing.T) {
 			// Forward transform
 			Analyze2D_97(coeffs, tt.width, tt.height, tt.levels)
 
-			// Inverse transform
-			Synthesize2D_97(coeffs, tt.width, tt.height, tt.levels)
+			// Inverse transform. It runs at the DECODER's precision, which is
+			// float32 -- the reference reinterprets a tile-component's int32
+			// buffer as OPJ_FLOAT32 for 9/7. A round trip in a test therefore
+			// crosses a boundary no real encode-then-decode crosses, since
+			// between the two sit quantisation and a codestream.
+			narrow := make([][]float32, tt.height)
+			for y := range coeffs {
+				narrow[y] = make([]float32, len(coeffs[y]))
+				for x, v := range coeffs[y] {
+					narrow[y][x] = float32(v)
+				}
+			}
+			Synthesize2D_97(narrow, tt.width, tt.height, tt.levels)
+			for y := range narrow {
+				for x, v := range narrow[y] {
+					coeffs[y][x] = float64(v)
+				}
+			}
 
 			// Compare with tolerance
 			maxErr := 0.0

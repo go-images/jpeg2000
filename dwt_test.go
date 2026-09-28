@@ -5,6 +5,47 @@ import (
 	"testing"
 )
 
+// ulp32Bound is how far a float32 synthesis may land from an exact
+// reconstruction, DERIVED rather than tuned.
+//
+// One unit in the last place of a float32 is 2^-23 of the magnitude. The bound
+// is taken over the LARGEST magnitude in the signal and not over each value,
+// because the lifting steps mix neighbours: a coefficient that should come back
+// as zero inherits the absolute error of the large values beside it, and a
+// per-value bound would call that a defect. Eight ULPs leaves room over the
+// worst any case here produces; worstULPs prints the margin so it can be read.
+const ulp32 = 1.1920928955078125e-07 // 2^-23
+
+func ulp32Bound(rows [][]float32) float64 {
+	var maxAbs float64
+	for _, r := range rows {
+		for _, v := range r {
+			if a := math.Abs(float64(v)); a > maxAbs {
+				maxAbs = a
+			}
+		}
+	}
+	return 8 * maxAbs * ulp32
+}
+
+// analyze97Into runs the ENCODER's 9/7 analysis, which works in float64, and
+// hands the result to the decoder's float32 world.
+//
+// A round trip in a test crosses a boundary a real decode never crosses:
+// analysis belongs to the encoder and synthesis to the decoder, and between
+// them sit quantisation and a codestream. The bridge is written once, here, so
+// that no test invents its own.
+func analyze97Into(data []float32) {
+	wide := make([]float64, len(data))
+	for i, v := range data {
+		wide[i] = float64(v)
+	}
+	analyze1D_97(wide)
+	for i, v := range wide {
+		data[i] = float32(v)
+	}
+}
+
 func TestSynthesize1D_53_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -87,64 +128,89 @@ func TestSynthesize1D_97_RoundTrip(t *testing.T) {
 	// so round-trip error is limited by float64 precision (~1e-14).
 	tests := []struct {
 		name      string
-		data      []float64
+		data      []float32
 		tolerance float64
 	}{
 		{
 			name:      "even length",
-			data:      []float64{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0},
+			data:      []float32{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0},
 			tolerance: 1e-10,
 		},
 		{
 			name:      "odd length",
-			data:      []float64{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0},
+			data:      []float32{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0},
 			tolerance: 1e-10,
 		},
 		{
 			name:      "single element",
-			data:      []float64{42.5},
+			data:      []float32{42.5},
 			tolerance: 1e-10,
 		},
 		{
 			name:      "two elements",
-			data:      []float64{10.5, 20.5},
+			data:      []float32{10.5, 20.5},
 			tolerance: 1e-10,
 		},
 		{
 			name:      "zeros",
-			data:      []float64{0, 0, 0, 0, 0, 0, 0, 0},
+			data:      []float32{0, 0, 0, 0, 0, 0, 0, 0},
 			tolerance: 1e-15,
 		},
 		{
 			name:      "alternating",
-			data:      []float64{1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0},
+			data:      []float32{1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0},
 			tolerance: 1e-10,
 		},
 		{
 			name:      "fractional",
-			data:      []float64{1.5, 2.7, 3.9, 4.1, 5.3, 6.8},
+			data:      []float32{1.5, 2.7, 3.9, 4.1, 5.3, 6.8},
 			tolerance: 1e-10,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			original := make([]float64, len(tt.data))
+			original := make([]float32, len(tt.data))
 			copy(original, tt.data)
 
-			// Forward transform
-			analyze1D_97(tt.data)
-
-			// Inverse transform
+			// The round trip CROSSES a precision boundary that a real decode
+			// never crosses: analysis belongs to the encoder and runs in
+			// float64, synthesis belongs to the decoder and runs in float32 --
+			// which is what the reference carries. So the two halves are
+			// bridged here explicitly, and the tolerance is float32's, not
+			// float64's.
+			analyze97Into(tt.data)
 			synthesize1D_97(tt.data)
 
-			// Check reconstruction
+			// The tolerance is DERIVED from the precision the synthesis works
+			// in, not tuned until the test passes. One unit in the last place
+			// of a float32 is 2^-23 of the value's magnitude; four inverse
+			// lifting steps and two scalings can each move the result by a
+			// fraction of one. Allowing eight leaves an order of magnitude over
+			// the worst error any case here produces, which the log prints as a
+			// multiple so the margin can be read rather than trusted.
+			//
+			// tt.tolerance is kept as a FLOOR, for the cases whose values are
+			// zero and have no last place to speak of.
+			const ulp32 = 1.1920928955078125e-07 // 2^-23
+			var worstULPs float64
 			for i := range original {
-				diff := math.Abs(tt.data[i] - original[i])
-				if diff > tt.tolerance {
-					t.Errorf("at index %d: got %f, want %f, diff %e", i, tt.data[i], original[i], diff)
+				diff := math.Abs(float64(tt.data[i]) - float64(original[i]))
+				allowed := 8 * math.Abs(float64(original[i])) * ulp32
+				if allowed < tt.tolerance {
+					allowed = tt.tolerance
+				}
+				if mag := math.Abs(float64(original[i])); mag > 0 {
+					if u := diff / (mag * ulp32); u > worstULPs {
+						worstULPs = u
+					}
+				}
+				if diff > allowed {
+					t.Errorf("at index %d: got %g, want %g, diff %e over an allowance of %e",
+						i, tt.data[i], original[i], diff, allowed)
 				}
 			}
+			t.Logf("worst reconstruction error %.2f ULPs of the value, allowance 8", worstULPs)
 		})
 	}
 }
@@ -260,31 +326,31 @@ func TestSynthesize2D_97_SingleLevel(t *testing.T) {
 	tolerance := 1e-8 // float64 precision throughout
 
 	// Create test data: simple gradient
-	coeffs := make([][]float64, height)
+	coeffs := make([][]float32, height)
 	for y := range height {
-		coeffs[y] = make([]float64, width)
+		coeffs[y] = make([]float32, width)
 		for x := range width {
-			coeffs[y][x] = float64(y*width + x)
+			coeffs[y][x] = float32(y*width + x)
 		}
 	}
 
 	// Save original
-	original := make([][]float64, height)
+	original := make([][]float32, height)
 	for y := range height {
-		original[y] = make([]float64, width)
+		original[y] = make([]float32, width)
 		copy(original[y], coeffs[y])
 	}
 
 	// Forward transform
 	for y := range height {
-		analyze1D_97(coeffs[y])
+		analyze97Into(coeffs[y])
 	}
 	for x := range width {
-		col := make([]float64, height)
+		col := make([]float32, height)
 		for y := range height {
 			col[y] = coeffs[y][x]
 		}
-		analyze1D_97(col)
+		analyze97Into(col)
 		for y := range height {
 			coeffs[y][x] = col[y]
 		}
@@ -293,15 +359,25 @@ func TestSynthesize2D_97_SingleLevel(t *testing.T) {
 	// Inverse transform
 	Synthesize2D_97(coeffs, width, height, levels)
 
-	// Verify reconstruction
+	// Verify reconstruction, at the precision the synthesis works in.
+	bound := ulp32Bound(original)
+	if bound < tolerance {
+		bound = tolerance
+	}
+	var worst float64
 	for y := range height {
 		for x := range width {
-			diff := math.Abs(coeffs[y][x] - original[y][x])
-			if diff > tolerance {
-				t.Errorf("at (%d,%d): got %f, want %f, diff %e", x, y, coeffs[y][x], original[y][x], diff)
+			diff := math.Abs(float64(coeffs[y][x] - original[y][x]))
+			if diff > worst {
+				worst = diff
+			}
+			if diff > bound {
+				t.Errorf("at (%d,%d): got %g, want %g, diff %e over an allowance of %e",
+					x, y, coeffs[y][x], original[y][x], diff, bound)
 			}
 		}
 	}
+	t.Logf("worst reconstruction error %e against an allowance of %e", worst, bound)
 }
 
 func TestSynthesize2D_OddDimensions(t *testing.T) {
@@ -357,22 +433,24 @@ func TestSynthesize2D_MultiLevel(t *testing.T) {
 	// Test with multiple decomposition levels
 	width, height := 16, 16
 	levels := 3
-	tolerance := 1e-6 // float64 precision (multi-level accumulates some error)
+	// Derived from the synthesis's precision rather than chosen: see
+	// ulp32Bound. Three levels accumulate, so the margin is worth reading --
+	// the log prints the worst error against the allowance.
 
 	// Create test data with interesting pattern
-	coeffs := make([][]float64, height)
+	coeffs := make([][]float32, height)
 	for y := range height {
-		coeffs[y] = make([]float64, width)
+		coeffs[y] = make([]float32, width)
 		for x := range width {
 			// Checkerboard-ish pattern
-			coeffs[y][x] = float64((x+y)%2)*100.0 + float64(x*y)
+			coeffs[y][x] = float32((x+y)%2)*100.0 + float32(x*y)
 		}
 	}
 
 	// Save original
-	original := make([][]float64, height)
+	original := make([][]float32, height)
 	for y := range height {
-		original[y] = make([]float64, width)
+		original[y] = make([]float32, width)
 		copy(original[y], coeffs[y])
 	}
 
@@ -383,16 +461,16 @@ func TestSynthesize2D_MultiLevel(t *testing.T) {
 
 		// Horizontal analysis
 		for y := range levelHeight {
-			analyze1D_97(coeffs[y][:levelWidth])
+			analyze97Into(coeffs[y][:levelWidth])
 		}
 
 		// Vertical analysis
 		for x := range levelWidth {
-			col := make([]float64, levelHeight)
+			col := make([]float32, levelHeight)
 			for y := range levelHeight {
 				col[y] = coeffs[y][x]
 			}
-			analyze1D_97(col)
+			analyze97Into(col)
 			for y := range levelHeight {
 				coeffs[y][x] = col[y]
 			}
@@ -403,19 +481,21 @@ func TestSynthesize2D_MultiLevel(t *testing.T) {
 	Synthesize2D_97(coeffs, width, height, levels)
 
 	// Verify reconstruction
+	bound := ulp32Bound(original)
 	maxErr := 0.0
 	for y := range height {
 		for x := range width {
-			diff := math.Abs(coeffs[y][x] - original[y][x])
+			diff := math.Abs(float64(coeffs[y][x] - original[y][x]))
 			if diff > maxErr {
 				maxErr = diff
 			}
-			if diff > tolerance {
-				t.Errorf("at (%d,%d): got %f, want %f, diff %e", x, y, coeffs[y][x], original[y][x], diff)
+			if diff > bound {
+				t.Errorf("at (%d,%d): got %g, want %g, diff %e over an allowance of %e",
+					x, y, coeffs[y][x], original[y][x], diff, bound)
 			}
 		}
 	}
-	t.Logf("Maximum reconstruction error: %e", maxErr)
+	t.Logf("worst reconstruction error %e against an allowance of %e", maxErr, bound)
 }
 
 func TestEdgeCases(t *testing.T) {
@@ -425,7 +505,7 @@ func TestEdgeCases(t *testing.T) {
 		high53 := make([]int32, 1)
 		synthesize1D_53(data53, low53, high53, 0) // Should not panic
 
-		data97 := []float64{}
+		data97 := []float32{}
 		synthesize1D_97(data97) // Should not panic
 	})
 
@@ -441,9 +521,9 @@ func TestEdgeCases(t *testing.T) {
 		}
 
 		// 9/7: single element with cas=0 is a no-op (per OpenJPEG opj_v8dwt_decode)
-		data97 := []float64{42.5}
+		data97 := []float32{42.5}
 		synthesize1D_97(data97)
-		if math.Abs(data97[0]-42.5) > 1e-10 {
+		if math.Abs(float64(data97[0])-42.5) > 1e-6 {
 			t.Errorf("got %f, want %f", data97[0], 42.5)
 		}
 	})
@@ -693,9 +773,9 @@ func BenchmarkSynthesize1D_97(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(string(rune(size)), func(b *testing.B) {
-			data := make([]float64, size)
+			data := make([]float32, size)
 			for i := range data {
-				data[i] = float64(i)
+				data[i] = float32(i)
 			}
 
 			b.ResetTimer()
@@ -713,9 +793,9 @@ func BenchmarkSynthesize1D_97_Bufs(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(string(rune(size)), func(b *testing.B) {
-			data := make([]float64, size)
+			data := make([]float32, size)
 			for i := range data {
-				data[i] = float64(i)
+				data[i] = float32(i)
 			}
 			var bufs dwtBufs97
 			bufs.ensure(size)
@@ -770,11 +850,11 @@ func BenchmarkSynthesize2D_97(b *testing.B) {
 
 	for _, sz := range sizes {
 		b.Run(string(rune(sz.width))+"x"+string(rune(sz.height)), func(b *testing.B) {
-			coeffs := make([][]float64, sz.height)
+			coeffs := make([][]float32, sz.height)
 			for y := 0; y < sz.height; y++ {
-				coeffs[y] = make([]float64, sz.width)
+				coeffs[y] = make([]float32, sz.width)
 				for x := 0; x < sz.width; x++ {
-					coeffs[y][x] = float64(y*sz.width + x)
+					coeffs[y][x] = float32(y*sz.width + x)
 				}
 			}
 
@@ -790,11 +870,11 @@ func BenchmarkSynthesize2D_MultiLevel(b *testing.B) {
 	width, height := 128, 128
 	levels := 4
 
-	coeffs := make([][]float64, height)
+	coeffs := make([][]float32, height)
 	for y := range height {
-		coeffs[y] = make([]float64, width)
+		coeffs[y] = make([]float32, width)
 		for x := range width {
-			coeffs[y][x] = float64(y*width + x)
+			coeffs[y][x] = float32(y*width + x)
 		}
 	}
 
@@ -834,14 +914,14 @@ func TestSynthesize2D_97_BlockTail(t *testing.T) {
 	}
 }
 
-func makeCoeffs(width, height int) [][]float64 {
-	c := make([][]float64, height)
+func makeCoeffs(width, height int) [][]float32 {
+	c := make([][]float32, height)
 	for y := range c {
-		c[y] = make([]float64, width)
+		c[y] = make([]float32, width)
 		for x := range c[y] {
 			// Values that are all different, and not representable as a short
 			// sum, so a column swapped for another one shows.
-			c[y][x] = float64(y*width+x)*1.0009765625 - 3
+			c[y][x] = float32(y*width+x)*1.0009765625 - 3
 		}
 	}
 	return c
@@ -853,14 +933,14 @@ func makeCoeffs(width, height int) [][]float64 {
 // synthesize2D97OneColumnAtATime is the vertical pass as it was written before
 // it took columns in blocks, kept as the thing the blocked one has to agree
 // with.
-func synthesize2D97OneColumnAtATime(coeffs [][]float64, width, height, levels int) {
+func synthesize2D97OneColumnAtATime(coeffs [][]float32, width, height, levels int) {
 	if levels < 1 {
 		return
 	}
 	var bufs dwtBufs97
 	maxDim := max(width, height)
 	bufs.ensure(maxDim)
-	col := make([]float64, height)
+	col := make([]float32, height)
 	for level := levels; level >= 1; level-- {
 		levelWidth := (width + (1 << (level - 1)) - 1) >> (level - 1)
 		levelHeight := (height + (1 << (level - 1)) - 1) >> (level - 1)
@@ -913,7 +993,7 @@ func TestSynthesize2D_97_WithDims_BlockTail(t *testing.T) {
 
 // withDimsOneColumnAtATime is Synthesize2D_97_WithDims's vertical pass as it
 // was before it took columns in blocks.
-func withDimsOneColumnAtATime(coeffs [][]float64, resDims []ResBounds) {
+func withDimsOneColumnAtATime(coeffs [][]float32, resDims []ResBounds) {
 	levels := len(resDims) - 1
 	if levels < 1 {
 		return
@@ -929,7 +1009,7 @@ func withDimsOneColumnAtATime(coeffs [][]float64, resDims []ResBounds) {
 	}
 	var bufs dwtBufs97
 	bufs.ensure(maxDim)
-	col := make([]float64, maxDim)
+	col := make([]float32, maxDim)
 	for level := levels; level >= 1; level-- {
 		resIdx := levels - level + 1
 		levelWidth := resDims[resIdx].Width
@@ -965,9 +1045,9 @@ func TestSynthesize97AtAnOddOriginWithAnOddSide(t *testing.T) {
 		for _, cas := range []int{0, 1} {
 			var bufs dwtBufs97
 			bufs.ensure(n)
-			data := make([]float64, n)
+			data := make([]float32, n)
 			for i := range data {
-				data[i] = float64(i)
+				data[i] = float32(i)
 			}
 			// It is the call that must not panic; what it computes is the
 			// business of the tests above.

@@ -17,32 +17,35 @@ const (
 
 // Lifting coefficients for 9/7 irreversible filter (ITU-T T.800 Table F.4)
 const (
-	lift97Alpha float64 = -1.586134342059924
-	lift97Beta  float64 = -0.052980118572961
-	lift97Gamma float64 = 0.882911075530934
-	lift97Delta float64 = 0.443506852043971
-	lift97K     float64 = 1.230174104914001
+	// Untyped, so that the same names serve the float32 synthesis and the
+	// float64 analysis: a typed constant would force one of the two to
+	// convert, and a conversion written at the use is a place to get it wrong.
+	lift97Alpha = -1.586134342059924
+	lift97Beta  = -0.052980118572961
+	lift97Gamma = 0.882911075530934
+	lift97Delta = 0.443506852043971
+	lift97K     = 1.230174104914001
 	// BUG_WEIRD_TWO_INVK: OpenJPEG uses 2/K instead of 1/K for high-pass scaling,
 	// compensated by using gain=0 for all subbands in 9/7 decode (see tcd.c).
 	// This avoids numerical issues when n=1 DWT levels cause no-op pass-throughs
 	// that would leave standard gain factors uncompensated.
-	lift97TwoInvK float64 = 2.0 / 1.230174104914001
+	lift97TwoInvK = 2.0 / 1.230174104914001
 )
 
 // dwtBufs97 holds reusable working buffers for 9/7 wavelet transforms.
 // Allocated once per 2D function call, reused across all rows/columns.
 type dwtBufs97 struct {
-	low, high []float64
+	low, high []float32
 }
 
 // ensure grows the internal buffers to accommodate a signal of length n.
 func (b *dwtBufs97) ensure(n int) {
 	half := (n + 1) / 2
 	if cap(b.low) < half {
-		b.low = make([]float64, half)
+		b.low = make([]float32, half)
 	}
 	if cap(b.high) < half {
-		b.high = make([]float64, half)
+		b.high = make([]float32, half)
 	}
 }
 
@@ -54,16 +57,16 @@ func synthesize1D_53(data []int32, low, high []int32, cas int) {
 // synthesize1D_97 performs in-place 1D inverse 9/7 wavelet transform
 // Input: coefficients [L0, L1, ..., H0, H1, ...] where first half is low-pass, second half is high-pass
 // Output: reconstructed signal in same array
-func synthesize1D_97(data []float64) {
+func synthesize1D_97(data []float32) {
 	synthesize1D_97_cas(data, 0)
 }
 
 // synthesize1D_97_cas performs 1D inverse 9/7 transform with parity control
 // cas=0: first output sample is at even position (standard case)
 // cas=1: first output sample is at odd position (for tiles starting at odd coordinates)
-// Uses float64 SIMD primitives for lifting, scaling, and interleaving while
+// Uses float32 SIMD primitives for lifting, scaling, and interleaving while
 // preserving JPEG2000's non-standard 2/K high-pass scaling (BUG_WEIRD_TWO_INVK).
-func synthesize1D_97_cas(data []float64, cas int) {
+func synthesize1D_97_cas(data []float32, cas int) {
 	n := len(data)
 	if n <= 1 {
 		return
@@ -73,14 +76,14 @@ func synthesize1D_97_cas(data []float64, cas int) {
 	if cas != 0 {
 		sn, dn = dn, sn
 	}
-	low := make([]float64, sn)
-	high := make([]float64, dn)
+	low := make([]float32, sn)
+	high := make([]float32, dn)
 	doSynthesize97(data, low, high, cas)
 }
 
 // synthesize1D_97_bufs performs the 9/7 inverse transform using pre-allocated buffers.
 // The caller must ensure bufs has been sized via bufs.ensure(len(data)).
-func synthesize1D_97_bufs(data []float64, bufs *dwtBufs97, cas int) {
+func synthesize1D_97_bufs(data []float32, bufs *dwtBufs97, cas int) {
 	n := len(data)
 	if n <= 1 {
 		return
@@ -99,7 +102,7 @@ func synthesize1D_97_bufs(data []float64, bufs *dwtBufs97, cas int) {
 //
 // For update steps (target=low) the phase is 1-cas; for predict steps
 // (target=high) it is cas.
-func lift97(low []float64, sn int, high []float64, dn int, cas int) {
+func lift97(low []float32, sn int, high []float32, dn int, cas int) {
 	wavelet.LiftStep97(low, sn, high, dn, lift97Delta, 1-cas)
 	wavelet.LiftStep97(high, dn, low, sn, lift97Gamma, cas)
 	wavelet.LiftStep97(low, sn, high, dn, lift97Beta, 1-cas)
@@ -107,7 +110,9 @@ func lift97(low []float64, sn int, high []float64, dn int, cas int) {
 }
 
 // doSynthesize97 is the core 9/7 inverse transform implementation.
-// Operates entirely on float64, using SIMD-accelerated lifting and interleaving.
+// Operates entirely on float32 -- the precision the reference uses, where a
+// tile-component buffer is reinterpreted as OPJ_FLOAT32 for 9/7 (openjpeg
+// dwt.c) -- with SIMD-accelerated lifting and interleaving.
 // low and high are separate buffers (not aliases of data), so Interleave can
 // write directly into data without an intermediate out buffer.
 //
@@ -120,7 +125,7 @@ func lift97(low []float64, sn int, high []float64, dn int, cas int) {
 //
 // Scaling per OpenJPEG's BUG_WEIRD_TWO_INVK approach: low-pass *= K, high-pass
 // *= 2/K rather than the standard 1/K.
-func doSynthesize97(data, low, high []float64, cas int) {
+func doSynthesize97(data, low, high []float32, cas int) {
 	sn := len(low)
 	dn := len(high)
 
@@ -275,13 +280,21 @@ func Synthesize2D_53_WithDims(coeffs [][]int32, resDims []ResBounds) {
 // JPEG2000 standard: forward is V→H (columns then rows), inverse is H→V (rows then columns)
 // width, height: dimensions of the full image
 // levels: number of decomposition levels
-// colBlock is how many columns the vertical pass of the 9/7 synthesis takes
-// at a time. Eight float64s are one cache line, which is the whole point: a
-// column of a [][]float64 is one value out of each row, so taking them one at
-// a time reads a line per row and uses an eighth of it.
+// colBlock is how many columns the vertical pass of the 9/7 synthesis takes at
+// a time. A column of a [][]float32 is one value out of each row, so taking
+// columns one at a time reads a whole cache line per row and uses four bytes
+// of it.
+//
+// Eight was chosen when the coefficients were float64 and eight of them were
+// one 64-byte line. At float32 SIXTEEN are, so this block now covers half a
+// line rather than all of it. It is left at eight because the figure that
+// matters is measured, not derived, and no measurement has been taken at
+// sixteen: the block also bounds the scratch buffer, which is colBlock*maxDim
+// values, and doubling it doubles that. Worth trying, with a number to show
+// for it.
 const colBlock = 8
 
-func Synthesize2D_97(coeffs [][]float64, width, height, levels int) {
+func Synthesize2D_97(coeffs [][]float32, width, height, levels int) {
 	if levels < 1 {
 		return
 	}
@@ -290,7 +303,7 @@ func Synthesize2D_97(coeffs [][]float64, width, height, levels int) {
 	var bufs dwtBufs97
 	maxDim := max(width, height)
 	bufs.ensure(maxDim)
-	cols := make([]float64, colBlock*maxDim)
+	cols := make([]float32, colBlock*maxDim)
 
 	// Process from coarsest to finest level
 	for level := levels; level >= 1; level-- {
@@ -334,7 +347,7 @@ func Synthesize2D_97(coeffs [][]float64, width, height, levels int) {
 // using explicit resolution dimensions instead of computing them.
 // resDims[i] contains bounds for resolution level i (0=coarsest)
 // The X0/Y0 values are used to compute DWT parity (cas) for tiles at odd positions.
-func Synthesize2D_97_WithDims(coeffs [][]float64, resDims []ResBounds) {
+func Synthesize2D_97_WithDims(coeffs [][]float32, resDims []ResBounds) {
 	levels := len(resDims) - 1
 	if levels < 1 {
 		return
@@ -352,7 +365,7 @@ func Synthesize2D_97_WithDims(coeffs [][]float64, resDims []ResBounds) {
 	}
 	var bufs dwtBufs97
 	bufs.ensure(maxDim)
-	cols := make([]float64, colBlock*maxDim)
+	cols := make([]float32, colBlock*maxDim)
 
 	for level := levels; level >= 1; level-- {
 		resIdx := levels - level + 1
@@ -394,7 +407,7 @@ func Synthesize2D_97_WithDims(coeffs [][]float64, resDims []ResBounds) {
 				n = colBlock
 			}
 			for y := range levelHeight {
-				scale := lift97K
+				var scale float32 = lift97K
 				if y >= snV {
 					scale = lift97TwoInvK
 				}
@@ -495,7 +508,16 @@ func roundTripError_97(original []float64) float64 {
 	copy(data, original)
 
 	analyze1D_97(data)
-	synthesize1D_97(data)
+	// The synthesis works at the reference's precision now, so the round trip
+	// crosses it and comes back.
+	f32 := make([]float32, len(data))
+	for i, v := range data {
+		f32[i] = float32(v)
+	}
+	synthesize1D_97(f32)
+	for i, v := range f32 {
+		data[i] = float64(v)
+	}
 
 	var maxErr float64
 	for i := range original {
