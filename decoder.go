@@ -238,27 +238,11 @@ func extractCodestream(data []byte) ([]byte, *JP2Metadata) {
 
 // decodeTiles decodes all tiles using EBCOT
 func (d *Decoder) decodeTiles() error {
-	// Calculate reduced dimensions if Reduce is specified
-	reduceScale := 1 << d.opts.Reduce
-
-	// Initialize component storage at component dimensions (accounting for subsampling and reduction)
+	// Component storage is allocated WHEN IT IS WRITTEN, not here: a tile that
+	// covers its whole component hands its own coefficients over instead, and
+	// allocating up front would keep the buffer that hand-over exists to avoid.
+	// See componentPlane and the adoption in decodeTile.
 	d.components = make([][][]int32, d.header.NumComps)
-	for c := 0; c < d.header.NumComps; c++ {
-		compWidth := d.header.ComponentWidth(c) / reduceScale
-		compHeight := d.header.ComponentHeight(c) / reduceScale
-		if compWidth < 1 {
-			compWidth = 1
-		}
-		if compHeight < 1 {
-			compHeight = 1
-		}
-		// One allocation, cut into rows: see the note in packet.go.
-		d.components[c] = make([][]int32, compHeight)
-		back := make([]int32, compHeight*compWidth)
-		for y := 0; y < compHeight; y++ {
-			d.components[c][y] = back[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
-		}
-	}
 
 	// Decode each tile
 	for _, tile := range d.tiles {
@@ -267,7 +251,64 @@ func (d *Decoder) decodeTiles() error {
 		}
 	}
 
+	// A component no tile wrote is still a component: everything downstream
+	// reads rows of the declared size, and reading nothing is not the same
+	// answer as reading zeroes.
+	for c := range d.components {
+		if d.components[c] == nil {
+			d.components[c] = d.componentPlane(c)
+		}
+	}
+
 	return nil
+}
+
+// coversWholeComponent reports whether a tile's coefficients ARE the component
+// plane: the same rows, of the same width, starting at its first pixel.
+//
+// It is a function of its own so that each thing it insists on has a witness of
+// its own. Asked through the decoder, the clauses mask each other -- a tile
+// that does not start at the origin is also a tile that does not cover the
+// height -- and some of them cannot be reached at all from the encoder, which
+// never writes a non-zero image origin. A predicate can be asked directly.
+//
+// offX and offY are where the tile begins RELATIVE to the component's origin.
+//
+// A ragged plane is refused although the composition loop would survive one:
+// that loop reads len(row) per row and copies a bounded run, where everything
+// downstream -- greyPicture, convertToRGBA, upsampleComponents -- indexes a row
+// by the component's width. Asking costs one pass over the row HEADERS, not
+// over the samples.
+func coversWholeComponent(rows [][]int32, offX, offY, w, h int) bool {
+	if offX != 0 || offY != 0 || w <= 0 || h <= 0 || len(rows) != h {
+		return false
+	}
+	for _, r := range rows {
+		if len(r) != w {
+			return false
+		}
+	}
+	return true
+}
+
+// componentPlane makes the rows of component c at its declared size, as one
+// allocation cut into rows: see the note in packet.go.
+func (d *Decoder) componentPlane(c int) [][]int32 {
+	reduceScale := 1 << d.opts.Reduce
+	compWidth := d.header.ComponentWidth(c) / reduceScale
+	compHeight := d.header.ComponentHeight(c) / reduceScale
+	if compWidth < 1 {
+		compWidth = 1
+	}
+	if compHeight < 1 {
+		compHeight = 1
+	}
+	plane := make([][]int32, compHeight)
+	back := make([]int32, compHeight*compWidth)
+	for y := 0; y < compHeight; y++ {
+		plane[y] = back[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
+	}
+	return plane
 }
 
 // decodeTile decodes a single tile using packet parsing and EBCOT
@@ -386,6 +427,41 @@ func (d *Decoder) decodeTile(tile *Tile) error {
 		// We subtract the image origin to convert absolute to relative coordinates.
 		imgOriginX := (d.header.XOsiz + xrsiz - 1) / xrsiz // ceil(XOsiz / XRsiz)
 		imgOriginY := (d.header.YOsiz + yrsiz - 1) / yrsiz // ceil(YOsiz / YRsiz)
+
+		// When one tile covers the whole component and starts at its origin,
+		// the loop below is a copy of every row onto a buffer of the same
+		// shape -- the identity, paid for at four bytes a sample. Hand the
+		// coefficients over instead.
+		//
+		// This is what the reference does: opj_j2k_move_data_from_codec_to_
+		// output_image assigns `data` and sets the source to NULL rather than
+		// copying it (openjpeg j2k.c). On a 46.3 Mpx scan it is 185 MB of a
+		// 717 MB live heap.
+		// TWO THINGS HERE ARE NOT WITNESSED BY A TEST, and both are said
+		// rather than left to be discovered:
+		//
+		//   `d.components[c] == nil` keeps a later tile from REPLACING a plane
+		//   earlier tiles have already written into. Tiles partition the image,
+		//   so a tile that covers a whole component is the only tile of it and
+		//   this cannot arise -- except in a malformed codestream whose tiles
+		//   overlap, which the encoder here cannot produce. Removing it breaks
+		//   no test.
+		//
+		//   The offsets passed below are always zero for every codestream this
+		//   package can produce, because the encoder writes XOsiz = YOsiz = 0
+		//   and a single tile then begins at the image origin. Passing literal
+		//   zeroes here breaks no test either. The clauses that read them are
+		//   witnessed where they are WRITTEN, in coversWholeComponent, which is
+		//   why that predicate is a function rather than a condition.
+		if d.components[c] == nil && d.opts.Reduce == 0 &&
+			coversWholeComponent(coeffs[c], tcX0-imgOriginX, tcY0-imgOriginY, compWidth, compHeight) {
+			d.components[c] = coeffs[c]
+			continue
+		}
+
+		if d.components[c] == nil {
+			d.components[c] = d.componentPlane(c)
+		}
 		for y := range actualHeight {
 			imgY := tcY0 + y - imgOriginY
 			if imgY < 0 || imgY >= compHeight || imgY >= len(d.components[c]) {
