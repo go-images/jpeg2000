@@ -15,6 +15,8 @@ package jpeg2000
 // neighborhood patterns.
 
 // EBCOT context IDs (0-18)
+import "runtime"
+
 const (
 	// Significance propagation contexts (0-8)
 	// Context depends on number and orientation of significant neighbors
@@ -1424,4 +1426,38 @@ func (e *ebcotDecoder) readSegmentationSymbols() {
 	_ = e.mq.Decode(ctxUniform)
 	_ = e.mq.Decode(ctxUniform)
 	_ = e.mq.Decode(ctxUniform)
+}
+
+// ebcotWorkers is how many code blocks may be decoded at once.
+//
+// Bounded rather than unbounded because a caller may already be drawing several
+// pages at once, and because the gain flattens: the passes are memory-bound on the
+// state and coefficient arrays well before the core count runs out. GOMAXPROCS is
+// the right question to ask -- a container told to use two cores must use two.
+// No floor here: GOMAXPROCS(0) returns the current setting, which the runtime
+// keeps at one or more, so a `< 1` branch would be one no test could tell from its
+// absence. newEBCOTDecoders carries the floor, where a caller CAN pass zero and a
+// test does.
+func ebcotWorkers() int {
+	return min(runtime.GOMAXPROCS(0), maxEBCOTWorkers)
+}
+
+// maxEBCOTWorkers caps the fan-out. Eight is measured, not chosen: see the note on
+// decodeSubband.
+const maxEBCOTWorkers = 8
+
+// newEBCOTDecoders makes n decoders that share nothing.
+func newEBCOTDecoders(n, width, height int) []*ebcotDecoder {
+	if n < 1 {
+		n = 1
+	}
+	out := make([]*ebcotDecoder, 0, n)
+	for i := 0; i < n; i++ {
+		e := newEBCOTDecoder(width, height)
+		if e == nil {
+			break
+		}
+		out = append(out, e)
+	}
+	return out
 }
