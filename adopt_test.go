@@ -49,33 +49,33 @@ func bytesPerPixel(t *testing.T, data []byte, px int, decode func([]byte) (image
 // onto a buffer of the same shape -- the identity, at four bytes a sample --
 // and the two buffers were alive at the same time.
 //
-// It is asked in bytes per pixel because that is what the saving IS: one int32
-// plane. Measured, the two paths sit at 10.6 and 14.6 bytes a pixel on the same
-// picture, a difference of 4.03 -- so a threshold of 12 separates them with a
-// margin of more than a byte a pixel on each side, and is not a number this
-// test can drift past while the copy is gone.
+// It asks for a DIFFERENCE and not for a figure. An absolute threshold is a
+// property of the BUILD, not of the code: the same decode that allocates 10.6
+// bytes a pixel here allocates 47.6 under `go test -race`, and a threshold of
+// 12 failed nine of ten CI lanes while the saving it was meant to detect was
+// intact in every one of them. The gap between the two decodes is measured in
+// the same build by the same binary, so it travels.
 //
-// The multi-tile decode beside it is the control: it CANNOT adopt, it must stay
-// above the threshold, and a test that only measured the fast path would pass
-// just as well if the measurement were meaningless.
+// The four-tile decode is what the one-tile decode is compared against, since
+// it CANNOT adopt -- no tile of it covers a component. Measured both ways:
+// with the hand-over the gap is 4.8 bytes a pixel here and 4.3 on CI; with the
+// hand-over removed it is 0.8, because then both sides copy. Three separates
+// them with room on each side, and is not a number this test can drift past
+// while the copy is gone.
 func TestOneTileHandsItsCoefficientsOverInsteadOfCopying(t *testing.T) {
 	const n = 1024
 	src := greySource(n)
-	plain := bytesPerPixel(t, encodeGrey(t, src, &EncodeOptions{Lossless: true}), n*n,
-		func(b []byte) (image.Image, error) { return Decode(bytes.NewReader(b)) })
+	decode := func(b []byte) (image.Image, error) { return Decode(bytes.NewReader(b)) }
+	plain := bytesPerPixel(t, encodeGrey(t, src, &EncodeOptions{Lossless: true}), n*n, decode)
 	tiled := bytesPerPixel(t, encodeGrey(t, src, &EncodeOptions{
-		Lossless: true, TileWidth: n / 2, TileHeight: n / 2}), n*n,
-		func(b []byte) (image.Image, error) { return Decode(bytes.NewReader(b)) })
+		Lossless: true, TileWidth: n / 2, TileHeight: n / 2}), n*n, decode)
 
-	t.Logf("one tile %.2f bytes/pixel, four tiles %.2f", plain, tiled)
-	const threshold = 12.0
-	if plain >= threshold {
-		t.Errorf("a one-tile decode allocated %.2f bytes a pixel, want below %.1f: "+
-			"the coefficients are being copied rather than handed over", plain, threshold)
-	}
-	if tiled <= plain {
-		t.Errorf("four tiles allocated %.2f bytes a pixel and one tile %.2f: "+
-			"the one-tile figure is not measuring what it claims", tiled, plain)
+	const gap = 3.0
+	t.Logf("one tile %.2f bytes/pixel, four tiles %.2f, gap %.2f", plain, tiled, tiled-plain)
+	if tiled-plain < gap {
+		t.Errorf("a one-tile decode allocated %.2f bytes a pixel against %.2f for four tiles, "+
+			"a gap of %.2f and not the %.1f an int32 plane is: the coefficients are being "+
+			"copied rather than handed over", plain, tiled, tiled-plain, gap)
 	}
 }
 
