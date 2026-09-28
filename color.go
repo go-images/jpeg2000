@@ -607,6 +607,22 @@ func sameShape(a, b [][]int32) bool {
 //
 // The transform itself is untouched: the same hwyimage.InverseICT over the same
 // values. What moves is only where they live.
+// ictBand is how many ROWS of the inverse ICT are held at a time.
+//
+// The six pooled SIMD images used to be the size of the PAGE: six float64
+// planes is 48 bytes a pixel, and a 4559 by 6942 colour scan peaked at 2416 MB
+// against 567 MB for a grey one of half again the pixels. The transform is
+// PIXEL-WISE -- InverseICT reads one y, cb, cr and writes one r, g, b, with no
+// neighbour and no vertical dependency at all, unlike the wavelet -- so the
+// rows it holds are free to choose and the output is the same bytes whatever
+// is chosen. A test asserts that against the whole-page form.
+//
+// 64 rows is 292 000 pixels on a scan that wide, which is far past the point
+// where a vector kernel stops caring about the length of its input. It was
+// chosen to make the buffers small, not fast: no timing was taken, because the
+// machine was not quiet enough to take one.
+const ictBand = 64
+
 func convertYCbCrInt32ToRGBA(components [][][]int32, width, height int,
 	bitDepths []int) *image.RGBA {
 
@@ -624,46 +640,69 @@ func convertYCbCrInt32ToRGBA(components [][][]int32, width, height int,
 		return 255.0 / float64((uint(1)<<bitDepth(c))-1)
 	}
 
-	buf := getFloat64Buf(width, height)
-	defer putFloat64Buf(buf)
-
 	// The Y component carries the display offset BEFORE the inverse transform,
 	// which is why it cannot simply be copied: ITU-T T.800 G.1.2, and the same
 	// order the float path used.
 	yOffset := float64(uint(1) << (bitDepth(0) - 1))
-	for y := range height {
-		row := buf.imgs[0].Row(y)
-		src := components[0][y]
-		for x, v := range src {
-			row[x] = float64(v) + yOffset
+	rScale, gScale, bScale := scale(0), scale(1), scale(2)
+
+	// TWO THINGS HERE ARE NOT WITNESSED BY A TEST, and both are said rather
+	// than left to be found:
+	//
+	//   A step SMALLER than the band -- `y0 += ictBand - 1` -- recomputes a row
+	//   of every band and the output does not change by one byte. That is the
+	//   same property that makes the band safe: InverseICT reads one pixel and
+	//   writes one pixel, so doing it twice writes the same answer. A defect
+	//   that costs 1/64 of the work and nothing else cannot be seen in a
+	//   picture.
+	//
+	//   Dropping putFloat64Buf costs every band six fresh images -- 52 bytes a
+	//   pixel against 5.5 -- and no test catches it. A test CAN see it, but
+	//   only when run alone: a sync.Pool is global, so a test that measures one
+	//   measures what the rest of the binary put there first. That test passed
+	//   under `go test ./...` and failed under `-run`, which makes it an
+	//   instrument that answers according to who ran before it. It was removed
+	//   rather than kept green.
+	for y0 := 0; y0 < height; y0 += ictBand {
+		rows := height - y0
+		if rows > ictBand {
+			rows = ictBand
 		}
-	}
-	for c := 1; c <= 2; c++ {
-		for y := range height {
-			row := buf.imgs[c].Row(y)
-			src := components[c][y]
+		buf := getFloat64Buf(width, rows)
+		for y := range rows {
+			row := buf.imgs[0].Row(y)
+			src := components[0][y0+y]
 			for x, v := range src {
-				row[x] = float64(v)
+				row[x] = float64(v) + yOffset
 			}
 		}
-	}
-
-	hwyimage.InverseICT(buf.imgs[0], buf.imgs[1], buf.imgs[2],
-		buf.imgs[3], buf.imgs[4], buf.imgs[5])
-
-	rScale, gScale, bScale := scale(0), scale(1), scale(2)
-	for y := range height {
-		rRow := buf.imgs[3].Row(y)
-		gRow := buf.imgs[4].Row(y)
-		bRow := buf.imgs[5].Row(y)
-		idx := img.PixOffset(0, y)
-		for x := range width {
-			img.Pix[idx+0] = clampFloat(rRow[x] * rScale)
-			img.Pix[idx+1] = clampFloat(gRow[x] * gScale)
-			img.Pix[idx+2] = clampFloat(bRow[x] * bScale)
-			img.Pix[idx+3] = 255
-			idx += 4
+		for c := 1; c <= 2; c++ {
+			for y := range rows {
+				row := buf.imgs[c].Row(y)
+				src := components[c][y0+y]
+				for x, v := range src {
+					row[x] = float64(v)
+				}
+			}
 		}
+
+		hwyimage.InverseICT(buf.imgs[0], buf.imgs[1], buf.imgs[2],
+			buf.imgs[3], buf.imgs[4], buf.imgs[5])
+
+		for y := range rows {
+			rRow := buf.imgs[3].Row(y)
+			gRow := buf.imgs[4].Row(y)
+			bRow := buf.imgs[5].Row(y)
+			idx := img.PixOffset(0, y0+y)
+			for x := range width {
+				img.Pix[idx+0] = clampFloat(rRow[x] * rScale)
+				img.Pix[idx+1] = clampFloat(gRow[x] * gScale)
+				img.Pix[idx+2] = clampFloat(bRow[x] * bScale)
+				img.Pix[idx+3] = 255
+				idx += 4
+			}
+		}
+		putFloat64Buf(buf)
 	}
 	return img
 }
