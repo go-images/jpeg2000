@@ -2407,9 +2407,9 @@ func ilog2(n int) int {
 }
 
 // decode decodes all code blocks and returns coefficients.
-// For 9/7 irreversible wavelet, also returns float64 coefficients with full
+// For 9/7 irreversible wavelet, also returns float32 coefficients with full
 // dequantization precision (no premature rounding to int32).
-func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
+func (td *TileDecoder) decode() ([][][]int32, [][][]float32, error) {
 	h := td.header
 	tile := td.tile
 
@@ -2433,9 +2433,9 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
 
 	// Allocate coefficient arrays for tile dimensions
 	coeffs := make([][][]int32, h.NumComps)
-	var floatCoeffs [][][]float64
+	var floatCoeffs [][][]float32
 	if waveletType == Wavelet97 {
-		floatCoeffs = make([][][]float64, h.NumComps)
+		floatCoeffs = make([][][]float32, h.NumComps)
 	}
 	// Store tile-component dimensions for each component
 	tileCompWidths := make([]int, h.NumComps)
@@ -2488,8 +2488,8 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
 			coeffs[c][y] = ints[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
 		}
 		if waveletType == Wavelet97 {
-			floatCoeffs[c] = make([][]float64, compHeight)
-			floats := make([]float64, compHeight*compWidth)
+			floatCoeffs[c] = make([][]float32, compHeight)
+			floats := make([]float32, compHeight*compWidth)
 			for y := range compHeight {
 				floatCoeffs[c][y] = floats[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
 			}
@@ -2520,7 +2520,7 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
 		for r := range numCompRes {
 			res := td.compResolutions[c][r]
 			for _, sb := range res.Subbands {
-				var fc [][]float64
+				var fc [][]float32
 				if floatCoeffs != nil {
 					fc = floatCoeffs[c]
 				}
@@ -2537,9 +2537,9 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float64, error) {
 
 // decodeSubband decodes all code blocks in a subband.
 // tileCompWidth and tileCompHeight are the tile-component dimensions (for multi-tile images).
-// floatCoeffs is non-nil for 9/7 wavelet: dequantized values are stored with full float64
+// floatCoeffs is non-nil for 9/7 wavelet: dequantized values are stored as float32
 // precision (no rounding), for use by the DWT synthesis.
-func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs [][]float64, ebcots []*ebcotDecoder, res int, comp int, tileCompWidth, tileCompHeight int) error {
+func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs [][]float32, ebcots []*ebcotDecoder, res int, comp int, tileCompWidth, tileCompHeight int) error {
 	h := td.header
 
 	// Code block grid parameters for coefficient placement.
@@ -2668,7 +2668,7 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 					continue
 				}
 				rowInt := coeffs[imgY]
-				var rowFloat []float64
+				var rowFloat []float32
 				if floatCoeffs != nil {
 					rowFloat = floatCoeffs[imgY]
 				}
@@ -2690,19 +2690,20 @@ func (td *TileDecoder) decodeSubband(sb *Subband, coeffs [][]int32, floatCoeffs 
 							// multiplying by step size.
 							coeff := float64(blockRow[cx]) * stepSize / 2.0
 							if rowFloat != nil {
-								// For 9/7 wavelet: store full-precision float64 for DWT.
+								// For 9/7 wavelet: store the unrounded value for the DWT,
+								// at the reference's precision.
 								// Rounding to int32 before DWT loses fractional precision
 								// that accumulates into errors of 2-7 levels.
 								//
 								// And ONLY there. The int32 plane is not read on this
-								// path: the transform runs on the float64 one and then
+								// path: the transform runs on the float one and then
 								// writes every element of the int32 one back from it, so
 								// a value rounded here is overwritten before anything
 								// looks at it. Rounding it was a dead store -- on a
 								// 9 449 by 13 701 page, 129.5 MILLION RoundToEven calls
 								// and 518 MB of writes into memory that is about to be
 								// filled again.
-								rowFloat[imgX] = coeff
+								rowFloat[imgX] = float32(coeff)
 							} else {
 								rowInt[imgX] = int32(math.RoundToEven(coeff))
 							}

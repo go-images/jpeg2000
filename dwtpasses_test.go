@@ -10,7 +10,7 @@ import (
 
 // reference97 is the 1D synthesis as it was written before the scaling was
 // folded into the read-out: copy, then ScaleSlice, then lift, then interleave.
-func reference97(data, low, high []float64, cas int) {
+func reference97(data, low, high []float32, cas int) {
 	sn, dn := len(low), len(high)
 	copy(low, data[:sn])
 	copy(high, data[sn:sn+dn])
@@ -26,7 +26,7 @@ func reference97(data, low, high []float64, cas int) {
 // referenceSynthesize2D_97 is the 2D vertical pass as it was written before the
 // interleave was folded into the scatter: gather, synthesise each column with
 // the 1D routine, interleave into the column buffer, scatter.
-func referenceSynthesize2D_97(coeffs [][]float64, resDims []ResBounds) {
+func referenceSynthesize2D_97(coeffs [][]float32, resDims []ResBounds) {
 	levels := len(resDims) - 1
 	if levels < 1 {
 		return
@@ -42,7 +42,7 @@ func referenceSynthesize2D_97(coeffs [][]float64, resDims []ResBounds) {
 	}
 	var bufs dwtBufs97
 	bufs.ensure(maxDim)
-	cols := make([]float64, colBlock*maxDim)
+	cols := make([]float32, colBlock*maxDim)
 	for level := levels; level >= 1; level-- {
 		resIdx := levels - level + 1
 		levelWidth := resDims[resIdx].Width
@@ -112,13 +112,13 @@ func TestFewerPassesIsBitIdentical(t *testing.T) {
 				X0:     c.x0, Y0: c.y0,
 			}
 		}
-		a := make([][]float64, c.h)
-		b := make([][]float64, c.h)
+		a := make([][]float32, c.h)
+		b := make([][]float32, c.h)
 		for y := range a {
-			a[y] = make([]float64, c.w)
-			b[y] = make([]float64, c.w)
+			a[y] = make([]float32, c.w)
+			b[y] = make([]float32, c.w)
 			for x := range a[y] {
-				v := (r.Float64() - 0.5) * 4096
+				v := float32((r.Float64() - 0.5) * 4096)
 				a[y][x], b[y][x] = v, v
 			}
 		}
@@ -127,10 +127,10 @@ func TestFewerPassesIsBitIdentical(t *testing.T) {
 
 		for y := range a {
 			for x := range a[y] {
-				if math.Float64bits(a[y][x]) != math.Float64bits(b[y][x]) {
+				if math.Float32bits(a[y][x]) != math.Float32bits(b[y][x]) {
 					t.Fatalf("%dx%d levels=%d origin=(%d,%d): at (%d,%d) got %v (%#016x), reference %v (%#016x)",
 						c.w, c.h, c.levels, c.x0, c.y0, x, y,
-						a[y][x], math.Float64bits(a[y][x]), b[y][x], math.Float64bits(b[y][x]))
+						a[y][x], math.Float32bits(a[y][x]), b[y][x], math.Float32bits(b[y][x]))
 				}
 			}
 		}

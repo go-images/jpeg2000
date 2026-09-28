@@ -321,8 +321,10 @@ func (d *Decoder) decodeTile(tile *Tile) error {
 	}
 
 	// Decode code blocks to get wavelet coefficients.
-	// floatCoeffs is non-nil for 9/7 wavelet and contains full-precision
-	// dequantized values (not rounded to int32) for DWT synthesis.
+	// floatCoeffs is non-nil for 9/7 wavelet and holds the dequantized values
+	// unrounded, for DWT synthesis. They are float32, which is what the
+	// reference carries: openjpeg reinterprets the tile-component's int32
+	// buffer as OPJ_FLOAT32 for 9/7 (dwt.c), four bytes a sample either way.
 	coeffs, floatCoeffs, err := td.decode()
 	if err != nil {
 		return fmt.Errorf("decode: %w", err)
@@ -389,19 +391,23 @@ func (d *Decoder) decodeTile(tile *Tile) error {
 		if waveletType == Wavelet53 {
 			Synthesize2D_53_WithDims(coeffs[c], resDims)
 		} else {
-			// 9/7 wavelet: use full-precision float64 coefficients from dequantization.
-			// This avoids premature rounding to int32 before DWT synthesis, which would
-			// lose fractional precision and cause errors of 2-7 levels.
-			var floatComp [][]float64
+			// 9/7 wavelet: use the unrounded coefficients from dequantization.
+			// Rounding to int32 before DWT synthesis loses fractional precision
+			// and causes errors of 2-7 levels.
+			//
+			// They are float32, which is the precision the reference carries:
+			// openjpeg reinterprets a tile-component's int32 buffer as
+			// OPJ_FLOAT32 for 9/7 (dwt.c), four bytes a sample either way.
+			var floatComp [][]float32
 			if floatCoeffs != nil {
 				floatComp = floatCoeffs[c]
 			} else {
-				// Fallback: convert int32 to float64
-				floatComp = make([][]float64, len(coeffs[c]))
+				// Fallback: convert int32 to float32
+				floatComp = make([][]float32, len(coeffs[c]))
 				for y := range coeffs[c] {
-					floatComp[y] = make([]float64, len(coeffs[c][y]))
+					floatComp[y] = make([]float32, len(coeffs[c][y]))
 					for x := range coeffs[c][y] {
-						floatComp[y][x] = float64(coeffs[c][y][x])
+						floatComp[y][x] = float32(coeffs[c][y][x])
 					}
 				}
 			}
@@ -414,7 +420,7 @@ func (d *Decoder) decodeTile(tile *Tile) error {
 			for y, src := range floatComp {
 				dst := coeffs[c][y]
 				for x, v := range src {
-					dst[x] = int32(math.RoundToEven(v))
+					dst[x] = int32(math.RoundToEven(float64(v)))
 				}
 			}
 		}
