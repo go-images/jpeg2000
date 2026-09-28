@@ -640,7 +640,10 @@ func (d *Decoder) needsICTForYCbCr() bool {
 
 // toImageUpsampled converts upsampled components to image.RGBA
 // Uses actual component dimensions (which are full image dimensions after upsampling)
-func (d *Decoder) toImageUpsampled() *image.RGBA {
+// The return type is image.Image rather than *image.RGBA because a one-component
+// picture now comes back as an *image.Gray, which is a quarter of the bytes. Its
+// two callers already hand back an interface.
+func (d *Decoder) toImageUpsampled() image.Image {
 	reversible := d.header.WaveletFilter == Wavelet53
 
 	// Use actual component dimensions after upsampling
@@ -677,6 +680,11 @@ func (d *Decoder) toImageUpsampled() *image.RGBA {
 			d.header.BitDepth, d.header.Signed)
 	}
 
+	// A one-component picture needs no colour at all: see greyPicture, which
+	// answers nil for anything but the plain shape and leaves the rest here.
+	if g := greyPicture(d.components, width, height, d.header.BitDepth, d.header.Signed); g != nil {
+		return g
+	}
 	return convertToRGBA(d.components, width, height,
 		d.header.BitDepth, d.header.Signed, reversible && needsTransform)
 }
@@ -768,7 +776,8 @@ func (d *Decoder) toCMYK() image.Image {
 		d.header.BitDepth, d.header.Signed, reversible && needsTransform)
 }
 
-func (d *Decoder) toImage() *image.RGBA {
+// The return type is image.Image rather than *image.RGBA: see toImageUpsampled.
+func (d *Decoder) toImage() image.Image {
 	reversible := d.header.WaveletFilter == Wavelet53
 
 	// Use actual component dimensions from decoded data
@@ -836,6 +845,11 @@ func (d *Decoder) toImage() *image.RGBA {
 			d.header.BitDepth, d.header.Signed)
 	}
 
+	// A one-component picture needs no colour at all: see greyPicture, which
+	// answers nil for anything but the plain shape and leaves the rest here.
+	if g := greyPicture(d.components, width, height, d.header.BitDepth, d.header.Signed); g != nil {
+		return g
+	}
 	return convertToRGBA(d.components, width, height,
 		d.header.BitDepth, d.header.Signed, reversible && needsTransform)
 }
