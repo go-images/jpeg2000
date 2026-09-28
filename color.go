@@ -233,20 +233,25 @@ func convertToRGBA(components [][][]int32, width, height int,
 		// For n-bit to 8-bit: scale by 255 / (2^n - 1)
 		// This maps [0, 2^n-1] to [0, 255] correctly
 		maxVal := int32((1 << bitDepth) - 1)
+		// The scaling is a property of the bit depth, so it is decided once rather
+		// than branched on per pixel, and the row offset walks instead of being
+		// recomputed by PixOffset for each of the picture's pixels.
+		scale := bitDepth != 8
+		src := newSampler(gray, width, height)
 		for y := range height {
+			row := src.row(y)
+			idx := y * img.Stride
 			for x := range width {
-				val := getComponentSample(gray, x, y, width, height) + offset
-				// Scale to 8-bit using proper factor
-				// For example: 4-bit uses * 255 / 15 = * 17
-				if bitDepth != 8 {
+				val := src.at(row, x) + offset
+				if scale {
 					val = (val*255 + maxVal/2) / maxVal
 				}
 				g := clampToUint8(val)
-				idx := img.PixOffset(x, y)
 				img.Pix[idx+0] = g   // R
 				img.Pix[idx+1] = g   // G
 				img.Pix[idx+2] = g   // B
 				img.Pix[idx+3] = 255 // A
+				idx += 4
 			}
 		}
 		return img
@@ -259,18 +264,22 @@ func convertToRGBA(components [][][]int32, width, height int,
 		bitDepth := getBitDepth(0)
 		offset := getOffset(0)
 		maxVal := int32((1 << bitDepth) - 1)
+		scale := bitDepth != 8
+		src := newSampler(gray, width, height)
 		for y := range height {
+			row := src.row(y)
+			idx := y * img.Stride
 			for x := range width {
-				val := getComponentSample(gray, x, y, width, height) + offset
-				if bitDepth != 8 {
+				val := src.at(row, x) + offset
+				if scale {
 					val = (val*255 + maxVal/2) / maxVal
 				}
 				g := clampToUint8(val)
-				idx := img.PixOffset(x, y)
 				img.Pix[idx+0] = g   // R
 				img.Pix[idx+1] = g   // G
 				img.Pix[idx+2] = g   // B
 				img.Pix[idx+3] = 255 // A
+				idx += 4
 			}
 		}
 		return img
@@ -312,32 +321,38 @@ func convertToRGBA(components [][][]int32, width, height int,
 		gMaxVal := int32((1 << gBitDepth) - 1)
 		bMaxVal := int32((1 << bBitDepth) - 1)
 
+		// Scaling is a property of each component's bit depth, decided once. The
+		// samplers resolve subsampling once per row -- which is what YCbCr 4:2:0
+		// needs and what a full-size scan does not.
+		rScale, gScale, bScale := rBitDepth != 8, gBitDepth != 8, bBitDepth != 8
+		rSrc := newSampler(rComp, width, height)
+		gSrc := newSampler(gComp, width, height)
+		bSrc := newSampler(bComp, width, height)
 		for y := range height {
+			rRow, gRow, bRow := rSrc.row(y), gSrc.row(y), bSrc.row(y)
+			idx := y * img.Stride
 			for x := range width {
-				// Use safe accessor that handles subsampling
-				// Apply per-component DC offset
-				rVal := getComponentSample(rComp, x, y, width, height) + rOffset
-				gVal := getComponentSample(gComp, x, y, width, height) + gOffset
-				bVal := getComponentSample(bComp, x, y, width, height) + bOffset
+				rVal := rSrc.at(rRow, x) + rOffset
+				gVal := gSrc.at(gRow, x) + gOffset
+				bVal := bSrc.at(bRow, x) + bOffset
 
-				// Scale each component to 8-bit using proper linear scaling
-				// For n-bit to 8-bit: output = (val * 255 + maxVal/2) / maxVal
-				// This maps [0, 2^n-1] to [0, 255] correctly
-				if rBitDepth != 8 {
+				// For n-bit to 8-bit: output = (val * 255 + maxVal/2) / maxVal,
+				// which maps [0, 2^n-1] onto [0, 255].
+				if rScale {
 					rVal = (rVal*255 + rMaxVal/2) / rMaxVal
 				}
-				if gBitDepth != 8 {
+				if gScale {
 					gVal = (gVal*255 + gMaxVal/2) / gMaxVal
 				}
-				if bBitDepth != 8 {
+				if bScale {
 					bVal = (bVal*255 + bMaxVal/2) / bMaxVal
 				}
 
-				idx := img.PixOffset(x, y)
 				img.Pix[idx+0] = clampToUint8(rVal)
 				img.Pix[idx+1] = clampToUint8(gVal)
 				img.Pix[idx+2] = clampToUint8(bVal)
 				img.Pix[idx+3] = 255
+				idx += 4
 			}
 		}
 		return img
@@ -378,14 +393,15 @@ func convertToRGBAFloat(components [][][]float64, width, height int,
 		gray := components[0]
 		offset, scale := getOffsetAndScale(0)
 		for y := range height {
+			row := gray[y]
+			idx := y * img.Stride
 			for x := range width {
-				val := (gray[y][x] + offset) * scale
-				g := clampFloat(val)
-				idx := img.PixOffset(x, y)
+				g := clampFloat((row[x] + offset) * scale)
 				img.Pix[idx+0] = g
 				img.Pix[idx+1] = g
 				img.Pix[idx+2] = g
 				img.Pix[idx+3] = 255
+				idx += 4
 			}
 		}
 		return img
@@ -433,19 +449,21 @@ func convertToRGBAFloat(components [][][]float64, width, height int,
 			bScale = 255.0 / float64((uint(1)<<getBitDepth(2))-1)
 		}
 
+		// The rows are bound once and the offset walks. Indexing rComp[y] inside
+		// the inner loop is a second dereference for every pixel, and PixOffset is
+		// a call that recomputes y*Stride + x*4 from scratch each time; a 2468 by
+		// 3809 scan has 9.4 million pixels and this page carries two such images.
 		for y := range height {
+			rRow, gRow, bRow := rComp[y], gComp[y], bComp[y]
+			idx := y * img.Stride
 			for x := range width {
-				// RGB values from ICT are already in [0, 2^B - 1] range
-				// Only scale if bit depth != 8
-				rVal := rComp[y][x] * rScale
-				gVal := gComp[y][x] * gScale
-				bVal := bComp[y][x] * bScale
-
-				idx := img.PixOffset(x, y)
-				img.Pix[idx+0] = clampFloat(rVal)
-				img.Pix[idx+1] = clampFloat(gVal)
-				img.Pix[idx+2] = clampFloat(bVal)
+				// RGB values from ICT are already in [0, 2^B - 1]; only a bit
+				// depth other than 8 needs scaling, and then the scale is 1.
+				img.Pix[idx+0] = clampFloat(rRow[x] * rScale)
+				img.Pix[idx+1] = clampFloat(gRow[x] * gScale)
+				img.Pix[idx+2] = clampFloat(bRow[x] * bScale)
 				img.Pix[idx+3] = 255
+				idx += 4
 			}
 		}
 		return img
