@@ -453,12 +453,13 @@ func (td *TileDecoder) createSubband(sbType SubbandType, width, height, resLevel
 	// instead (encoder.go, `bx0 := cbx * cbw`), and the two agree only when
 	// every subband starts on the grid.
 	//
-	// That divergence is real and is not the whole story: measured on a
-	// 256x256 picture, tile grids of 128, 64, 32, 160 and 224 round-trip
-	// exactly while 96, 100, 120, 48, 80, 129, 200 and 255 do not, and for a
-	// 96 grid the tiles at origin 0 and 192 are right while the one at 96 is
-	// wrong -- although every subband of both is off the grid. Whatever else
-	// is involved, a reader should not be told this field is unused.
+	// The encoder now anchors its blocks the same way (see blockGrid), which
+	// was one of TWO divergences, both from the same cause: it is handed the
+	// tile's size and never its position. The other is the DWT lifting phase,
+	// which Synthesize2D_*_WithDims takes X0/Y0 for and Analyze2D_* cannot
+	// see. A predictor built from the two and tested against every measured
+	// tile grid says `blocks || phase`, and it matches all fifteen -- see
+	// TestWhichTileGridsSurviveARoundTrip.
 	// Per ITU-T T.800 Annex B equation B-16:
 	//   Low-pass:  tbx0 = ceil(trx0 / 2)
 	//   High-pass: tbx0 = ceil((trx0 - 1) / 2) = floor(trx0 / 2)

@@ -426,8 +426,15 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 					continue
 				}
 
-				codeBlocksX := (sbW + cbw - 1) / cbw
-				codeBlocksY := (sbH + cbh - 1) / cbh
+				// The code-block grid is anchored at the REFERENCE GRID's
+				// origin, not at the subband: see blockGrid and T.800 B.7.
+				// Cutting from the subband's own start instead agrees only
+				// when the subband happens to begin on a block boundary,
+				// which for a tile away from the image origin it generally
+				// does not.
+				absX0, absY0 := subbandOrigin(sbIdx, numLevels, tx0, ty0)
+				codeBlocksX, atX := blockGrid(absX0, sbW, cbw)
+				codeBlocksY, atY := blockGrid(absY0, sbH, cbh)
 				encSb := NewEncoderSubband(sbType, sbW, sbH, codeBlocksX, codeBlocksY)
 
 				// Guard bits + exponent for magnitude bit count
@@ -436,10 +443,13 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 				// Encode each code block
 				for cby := range codeBlocksY {
 					for cbx := range codeBlocksX {
-						bx0 := cbx * cbw
-						by0 := cby * cbh
-						bw := min(cbw, sbW-bx0)
-						bh := min(cbh, sbH-by0)
+						bx0, bx1 := atX(cbx)
+						by0, by1 := atY(cby)
+						bw := bx1 - bx0
+						bh := by1 - by0
+						if bw <= 0 || bh <= 0 {
+							continue
+						}
 
 						cbCoeffs := make([][]int32, bh)
 						for y := range bh {
