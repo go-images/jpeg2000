@@ -90,19 +90,24 @@ func TestWhichTileGridsSurviveARoundTrip(t *testing.T) {
 		}
 	}
 
-	// The irreversible filter shares the block grid, the subband layout and
-	// the quantiser's idea of where a subband is, and all three are fixed. Two
-	// grids are still not exact and are REPORTED rather than asserted: both
-	// have a tile whose extent falls to zero at a coarse resolution, which is
-	// the shape that was wrong last and may be wrong still.
+	// The irreversible filter shares every fix and is exact on all of these.
 	lossy := &EncodeOptions{Quality: 1.0}
-	for _, tile := range []int{0, 256, 128, 96, 100, 64, 32} {
+	for _, tile := range []int{0, 256, 128, 120, 100, 96, 64, 48, 32} {
 		if bad := wrong(tile, lossy); bad != 0 {
 			t.Errorf("irreversible, tile %d: %d of %d pixels past 12 levels", tile, bad, n*n)
 		}
 	}
-	for _, tile := range []int{120, 255} {
-		t.Logf("irreversible, tile %d: %d of %d pixels past 12 levels -- still to fix",
-			tile, wrong(tile, lossy), n*n)
-	}
+
+	// 255 leaves ONE pixel, and that pixel is a tile of its own: a 1x1 tile at
+	// the corner, whose single coefficient is lost -- it decodes to 128, which
+	// is exactly the DC level shift and nothing else. Below quality 1.0 the
+	// same grid does not decode at all ("parsed 1 bytes from bitstream but got
+	// 0 bytes of data").
+	//
+	// BOTH PREDATE THIS WORK: v0.12.2 and v0.13.0 give the same 128 and the
+	// same parse failure. They are a defect of a one-pixel tile, which the
+	// fixes around them made visible rather than caused, and they are reported
+	// rather than asserted because pinning a defect makes it permanent.
+	t.Logf("irreversible, tile 255: %d of %d pixels past 12 levels -- a 1x1 corner tile, "+
+		"pre-existing", wrong(255, lossy), n*n)
 }

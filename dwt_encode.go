@@ -107,12 +107,42 @@ func Analyze2D_97_At(coeffs [][]float64, tcx0, tcy0, tcx1, tcy1, levels int) {
 		}
 		casH, casV := rx0&1, ry0&1
 
+		// A column of ONE sample has no neighbour to lift against, so
+		// analyze1D_97_cas leaves it alone -- but the INVERSE does not leave
+		// it alone. Synthesize2D_97_WithDims hoists the subband scaling into
+		// the copy that fills its column buffer, `v * K` or `v * 2/K` by which
+		// half the row falls in, and that copy runs for a one-row resolution
+		// like any other. Its own 1-D routine would not have scaled it; the
+		// 2-D path is the one a real decode takes, and the forward has to
+		// answer the path that is taken.
+		//
+		// Which factor it is, is decided by cas exactly as it is there: at
+		// casV=0 the lone sample is the low band, at casV=1 the low band is
+		// empty and it is the high one.
+		//
+		// The horizontal pass is deliberately NOT given the same treatment:
+		// the inverse's horizontal pass delegates to synthesize1D_97_bufs,
+		// which returns early for a single sample without scaling it. The
+		// asymmetry is the decoder's, and the encoder has to match the decoder
+		// rather than tidy it.
+		oneRow := float64(0)
+		if levelHeight == 1 {
+			oneRow = lift97K
+			if casV != 0 {
+				oneRow = lift97TwoInvK
+			}
+		}
+
 		// Vertical analysis first (process columns)
 		for x := range levelWidth {
 			for y := range levelHeight {
 				col[y] = coeffs[y][x]
 			}
-			analyze1D_97_cas(col[:levelHeight], casV)
+			if oneRow != 0 {
+				col[0] /= oneRow
+			} else {
+				analyze1D_97_cas(col[:levelHeight], casV)
+			}
 			for y := range levelHeight {
 				coeffs[y][x] = col[y]
 			}
