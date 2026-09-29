@@ -2488,8 +2488,20 @@ func (td *TileDecoder) decode() ([][][]int32, [][][]float32, error) {
 			coeffs[c][y] = ints[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
 		}
 		if waveletType == Wavelet97 {
+			// The SAME memory, read as float32. The reference does exactly
+			// this: a tile-component is one OPJ_INT32* (openjpeg tcd.h) and
+			// the 9/7 synthesis casts it -- "Where void* is a OPJ_INT32* for
+			// 5x3 and OPJ_FLOAT32* for 9x7" (dwt.c) -- then converts in place,
+			// reading a float from a slot and writing an int back to it
+			// (opj_tcd_dc_level_shift_decode, tcd.c). One buffer, not two.
+			//
+			// Nothing writes the int32 view while the float32 one is in use.
+			// decodeSubband takes the integer path only when inv.reversible,
+			// and reversible is `wavelet == Wavelet53 && quantStyle == 0` --
+			// so it is false exactly when floatCoeffs exists. A test pins that,
+			// because this merge rests on it and it is decided in another file.
 			floatCoeffs[c] = make([][]float32, compHeight)
-			floats := make([]float32, compHeight*compWidth)
+			floats := float32View(ints)
 			for y := range compHeight {
 				floatCoeffs[c][y] = floats[y*compWidth : (y+1)*compWidth : (y+1)*compWidth]
 			}
