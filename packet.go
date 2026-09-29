@@ -438,9 +438,27 @@ func (td *TileDecoder) createSubband(sbType SubbandType, width, height, resLevel
 	// Per ITU-T T.800 Annex B equations B-15, B-16:
 	// For LL and LH (low-pass horizontal): tbx0 = ceil(trx0 / 2)
 	// For HL and HH (high-pass horizontal): tbx0 = ceil((trx0 - 1) / 2)
-	// These values are stored in sb.X0/Y0 for informational purposes but are
-	// not used for coefficient placement (which uses code block grid indices).
-	// Calculate subband origin in image-space coordinates (tbX0, tbY0).
+	//
+	// sb.X0 AND sb.Y0 ARE USED FOR COEFFICIENT PLACEMENT. A comment here said
+	// they were kept "for informational purposes" and were not; decodeSubband
+	// reads them to anchor the code-block grid --
+	//
+	//	gridX0 := sb.X0 / cbWidth
+	//	startX := max((gridX0+x)*cbWidth-sb.X0, 0)
+	//
+	// -- which is what T.800 B.7 requires: code-blocks sit on a grid anchored
+	// at the origin of the reference grid, not at the subband, so a subband
+	// that does not start on a multiple of the code-block size has a PARTIAL
+	// first block. The encoder in this package anchors them at the subband
+	// instead (encoder.go, `bx0 := cbx * cbw`), and the two agree only when
+	// every subband starts on the grid.
+	//
+	// That divergence is real and is not the whole story: measured on a
+	// 256x256 picture, tile grids of 128, 64, 32, 160 and 224 round-trip
+	// exactly while 96, 100, 120, 48, 80, 129, 200 and 255 do not, and for a
+	// 96 grid the tiles at origin 0 and 192 are right while the one at 96 is
+	// wrong -- although every subband of both is off the grid. Whatever else
+	// is involved, a reader should not be told this field is unused.
 	// Per ITU-T T.800 Annex B equation B-16:
 	//   Low-pass:  tbx0 = ceil(trx0 / 2)
 	//   High-pass: tbx0 = ceil((trx0 - 1) / 2) = floor(trx0 / 2)
