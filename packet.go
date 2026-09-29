@@ -726,40 +726,25 @@ func (td *TileDecoder) parsePackets() error {
 	// nothing even if the bitstream contains data.
 	//
 	// IMPORTANT: Code blocks can be "included" with zero data length - this is valid
-	// JPEG2000 and means the coefficients are zero. Only return an error if we have
-	// code blocks that were never included at all, which indicates a parsing failure.
-	if totalDataCollected == 0 && len(allData) > 0 {
-		// Check if any code blocks were included (parsed from packet headers)
-		// A code block is included if cb.IncludedLayer >= 0
-		hasIncludedCodeBlocks := false
-		hasCodeBlocks := false
-		for _, compRes := range td.compResolutions {
-			for _, res := range compRes {
-				for _, sb := range res.Subbands {
-					if sb.CodeBlocksX > 0 && sb.CodeBlocksY > 0 {
-						hasCodeBlocks = true
-						// Check if any code block in this subband was included
-						for y := 0; y < sb.CodeBlocksY; y++ {
-							for x := 0; x < sb.CodeBlocksX; x++ {
-								if sb.CodeBlocks[y][x].IncludedLayer >= 0 {
-									hasIncludedCodeBlocks = true
-									break
-								}
-							}
-							if hasIncludedCodeBlocks {
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Only return an error if we have code blocks that weren't included
-		if hasCodeBlocks && !hasIncludedCodeBlocks {
-			return fmt.Errorf("no packet data read: parsed %d bytes from bitstream but got 0 bytes of data", len(allData))
-		}
-	}
+	// JPEG2000 and means the coefficients are zero.
+	//
+	// A code block that is never included AT ALL is also valid, and this used to
+	// refuse it. The inference was that nothing included means a parsing
+	// failure; it does not. A tile whose every coefficient quantises to zero
+	// has every code block excluded in every layer, and that is what the
+	// encoder writes for it.
+	//
+	// ARBITRATED, not argued: a 255x255 tile grid at quality 0.5 leaves a 1x1
+	// tile at the corner whose single coefficient quantises away. OpenJPEG
+	// decodes that file without complaint -- and renders the corner pixel as
+	// 128, the DC level shift and nothing else, exactly as this decoder does
+	// once it stops refusing. Ours returned "no packet data read: parsed 1
+	// bytes from bitstream but got 0 bytes of data" and gave up on the page.
+	//
+	// The cost of dropping the guard is real and is stated: a genuine misparse
+	// that collects nothing now yields a tile of zeroes instead of an error.
+	// A decoder that refuses a file the reference accepts is the worse of the
+	// two, and a wrong picture is visible where a refused page is not.
 
 	return nil
 }
