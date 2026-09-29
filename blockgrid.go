@@ -61,3 +61,39 @@ func blockGrid(absX0, size, cb int) (n int, at func(i int) (lo, hi int)) {
 		return lo, hi
 	}
 }
+
+// subbandBoundsAt is subbandBounds for a tile-component that begins at
+// (tcx0, tcy0) on the reference grid, saying where each subband sits INSIDE the
+// tile's coefficient array and how large it is.
+//
+// The array is laid out as the transform leaves it, so the split points are the
+// low-pass extents at each level -- and an extent is the difference of two
+// ceilings, ceil(tcx1/2^n) - ceil(tcx0/2^n), not the ceiling of a difference.
+// The two are the same number only when the tile begins at zero, which is why
+// halving the WIDTH repeatedly was right for an untiled picture and wrong for
+// every tile beside the first.
+func subbandBoundsAt(sbIdx, numLevels, tcx0, tcy0, tcx1, tcy1 int) (SubbandType, int, int, int, int) {
+	// low is the extent of the low-pass band after n halvings.
+	low := func(x0, x1, n int) int { return ceilShift(x1, n) - ceilShift(x0, n) }
+
+	if sbIdx == 0 {
+		return SubbandLL, 0, 0,
+			low(tcx0, tcx1, numLevels), low(tcy0, tcy1, numLevels)
+	}
+
+	detailIdx := sbIdx - 1
+	level := numLevels - detailIdx/3 // 1-indexed from the finest
+	orient := detailIdx % 3          // 0=LH, 1=HL, 2=HH
+
+	llW, llH := low(tcx0, tcx1, level), low(tcy0, tcy1, level)
+	parentW, parentH := low(tcx0, tcx1, level-1), low(tcy0, tcy1, level-1)
+
+	switch orient {
+	case 0: // LH: below the LL
+		return SubbandLH, 0, llH, llW, parentH - llH
+	case 1: // HL: beside the LL
+		return SubbandHL, llW, 0, parentW - llW, llH
+	default: // HH: diagonal
+		return SubbandHH, llW, llH, parentW - llW, parentH - llH
+	}
+}

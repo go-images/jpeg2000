@@ -359,7 +359,7 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 	// Forward DWT
 	if e.opts.Lossless {
 		for c := 0; c < e.numComps; c++ {
-			Analyze2D_53(tileComps[c], tw, th, numLevels)
+			Analyze2D_53_At(tileComps[c], tx0, ty0, tx1, ty1, numLevels)
 		}
 	} else {
 		// For lossy, work in float64 for DWT then quantize
@@ -421,8 +421,19 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 				if sbIdx >= 3*numLevels+1 {
 					continue
 				}
-				sbType, sbX0, sbY0, sbW, sbH := subbandBounds(sbIdx, numLevels, tw, th)
+				sbType, sbX0, sbY0, sbW, sbH := subbandBoundsAt(sbIdx, numLevels, tx0, ty0, tx1, ty1)
 				if sbW <= 0 || sbH <= 0 {
+					// A subband with no extent still gets a subband, with no
+					// code-blocks in it. T.800 wants a packet for every
+					// resolution of every tile whatever its size, and the
+					// decoder says so where it counts them: "Empty packets are
+					// still present in the bitstream and must be parsed to stay
+					// synchronized". Skipping it entirely leaves the parser a
+					// packet short, and it fails with "parsed N bytes from
+					// bitstream but got 0 bytes of data" -- which is what a
+					// one-pixel-wide tile did.
+					res.Subbands = append(res.Subbands,
+						NewEncoderSubband(sbType, max(sbW, 0), max(sbH, 0), 0, 0))
 					continue
 				}
 

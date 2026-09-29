@@ -14,28 +14,53 @@ import (
 // analysis first (columns), then horizontal analysis (rows). This is the
 // opposite of the inverse transform which does horizontal then vertical.
 func Analyze2D_53(coeffs [][]int32, width, height, levels int) {
+	Analyze2D_53_At(coeffs, 0, 0, width, height, levels)
+}
+
+// Analyze2D_53_At is the forward 5/3 transform of a tile-component that begins
+// at (tcx0, tcy0) on the reference grid and ends before (tcx1, tcy1).
+//
+// The POSITION is not decoration. Each lifting step alternates between even and
+// odd samples, and which of the two a subband's first sample is depends on
+// where the tile begins -- not on how wide it is. Synthesize2D_53_WithDims
+// takes each resolution's X0/Y0 for exactly this, calling it cas; the forward
+// transform used to assume every tile began at zero, so a tile that did not
+// was analysed in one phase and synthesised in the other.
+//
+// Analyze2D_53 keeps the old shape and passes an origin of zero, which is what
+// an untiled picture and every existing caller have.
+func Analyze2D_53_At(coeffs [][]int32, tcx0, tcy0, tcx1, tcy1, levels int) {
 	if levels < 1 {
 		return
 	}
 
 	// Pre-allocate reusable buffers for the largest dimension.
-	maxDim := max(width, height)
+	maxDim := max(tcx1-tcx0, tcy1-tcy0)
 	maxHalf := (maxDim + 1) / 2
 	low53 := make([]int32, maxHalf)
 	high53 := make([]int32, maxHalf)
-	col := make([]int32, height)
+	col := make([]int32, max(tcy1-tcy0, 0))
 
-	// Process from finest to coarsest level
+	// Process from finest to coarsest level. At `level` the data is the
+	// resolution whose origin is the tile's, shifted level-1 times: its
+	// EXTENT is the difference of two ceilings and not the ceiling of a
+	// difference, which are the same number only when the origin is zero.
 	for level := 1; level <= levels; level++ {
-		levelWidth := (width + (1 << (level - 1)) - 1) >> (level - 1)
-		levelHeight := (height + (1 << (level - 1)) - 1) >> (level - 1)
+		n := level - 1
+		rx0, rx1 := ceilShift(tcx0, n), ceilShift(tcx1, n)
+		ry0, ry1 := ceilShift(tcy0, n), ceilShift(tcy1, n)
+		levelWidth, levelHeight := rx1-rx0, ry1-ry0
+		if levelWidth <= 0 || levelHeight <= 0 {
+			continue
+		}
+		casH, casV := rx0&1, ry0&1
 
 		// Vertical analysis first (process columns)
 		for x := range levelWidth {
 			for y := range levelHeight {
 				col[y] = coeffs[y][x]
 			}
-			wavelet.Analyze53(col[:levelHeight], 0, low53, high53)
+			wavelet.Analyze53(col[:levelHeight], casV, low53, high53)
 			for y := range levelHeight {
 				coeffs[y][x] = col[y]
 			}
@@ -43,7 +68,7 @@ func Analyze2D_53(coeffs [][]int32, width, height, levels int) {
 
 		// Horizontal analysis second (process rows)
 		for y := range levelHeight {
-			wavelet.Analyze53(coeffs[y][:levelWidth], 0, low53, high53)
+			wavelet.Analyze53(coeffs[y][:levelWidth], casH, low53, high53)
 		}
 	}
 }
