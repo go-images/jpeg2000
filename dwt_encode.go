@@ -83,24 +83,36 @@ func Analyze2D_53_At(coeffs [][]int32, tcx0, tcy0, tcx1, tcy1, levels int) {
 // analysis first (columns), then horizontal analysis (rows). This is the
 // opposite of the inverse transform which does horizontal then vertical.
 func Analyze2D_97(coeffs [][]float64, width, height, levels int) {
+	Analyze2D_97_At(coeffs, 0, 0, width, height, levels)
+}
+
+// Analyze2D_97_At is Analyze2D_53_At's twin for the irreversible filter: the
+// same reason, the same arithmetic, the other wavelet.
+func Analyze2D_97_At(coeffs [][]float64, tcx0, tcy0, tcx1, tcy1, levels int) {
 	if levels < 1 {
 		return
 	}
 
 	// Pre-allocate column buffer outside the loop.
-	col := make([]float64, height)
+	col := make([]float64, max(tcy1-tcy0, 0))
 
 	// Process from finest to coarsest level
 	for level := 1; level <= levels; level++ {
-		levelWidth := (width + (1 << (level - 1)) - 1) >> (level - 1)
-		levelHeight := (height + (1 << (level - 1)) - 1) >> (level - 1)
+		n := level - 1
+		rx0, rx1 := ceilShift(tcx0, n), ceilShift(tcx1, n)
+		ry0, ry1 := ceilShift(tcy0, n), ceilShift(tcy1, n)
+		levelWidth, levelHeight := rx1-rx0, ry1-ry0
+		if levelWidth <= 0 || levelHeight <= 0 {
+			continue
+		}
+		casH, casV := rx0&1, ry0&1
 
 		// Vertical analysis first (process columns)
 		for x := range levelWidth {
 			for y := range levelHeight {
 				col[y] = coeffs[y][x]
 			}
-			analyze1D_97(col[:levelHeight])
+			analyze1D_97_cas(col[:levelHeight], casV)
 			for y := range levelHeight {
 				coeffs[y][x] = col[y]
 			}
@@ -108,7 +120,7 @@ func Analyze2D_97(coeffs [][]float64, width, height, levels int) {
 
 		// Horizontal analysis second (process rows)
 		for y := range levelHeight {
-			analyze1D_97(coeffs[y][:levelWidth])
+			analyze1D_97_cas(coeffs[y][:levelWidth], casH)
 		}
 	}
 }
