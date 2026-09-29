@@ -18,7 +18,7 @@ import (
 // two, origins that are multiples of 2^levels, and subbands that sit off the
 // code-block grid).
 //
-// The mechanism IS established now, by a predictor written from the two
+// The mechanism is established and the REVERSIBLE path is fixed, by a predictor written from the two
 // implementations and tested against every case here rather than from the
 // shape of a few. The encoder is handed the tile's size and never its
 // position, and that costs it twice:
@@ -47,10 +47,11 @@ func TestWhichTileGridsSurviveARoundTrip(t *testing.T) {
 			src.SetGray(x, y, color.Gray{Y: uint8((x*7 + y*3) % 256)})
 		}
 	}
-	wrong := func(tile int) int {
+	wrong := func(tile int, opts *EncodeOptions) int {
+		o := *opts
+		o.TileWidth, o.TileHeight = tile, tile
 		var buf bytes.Buffer
-		if err := Encode(&buf, src, &EncodeOptions{
-			Lossless: true, TileWidth: tile, TileHeight: tile}); err != nil {
+		if err := Encode(&buf, src, &o); err != nil {
 			t.Fatalf("tile %d: encode: %v", tile, err)
 		}
 		img, err := Decode(bytes.NewReader(buf.Bytes()))
@@ -61,7 +62,15 @@ func TestWhichTileGridsSurviveARoundTrip(t *testing.T) {
 		for y := range n {
 			for x := range n {
 				g, _, _, _ := img.At(x, y).RGBA()
-				if uint8(g>>8) != uint8((x*7+y*3)%256) {
+				want, got := int((x*7+y*3)%256), int(uint8(g>>8))
+				d := want - got
+				if d < 0 {
+					d = -d
+				}
+				// Exact for the reversible filter; the irreversible one is
+				// lossy by construction, so a dozen levels is the noise floor
+				// and anything past it is the tiling, not the quantiser.
+				if (opts.Lossless && d != 0) || (!opts.Lossless && d > 12) {
 					bad++
 				}
 			}
@@ -69,19 +78,31 @@ func TestWhichTileGridsSurviveARoundTrip(t *testing.T) {
 		return bad
 	}
 
-	// Exact today. A change that breaks one of these has broken tiling
-	// further, whatever it was meant to fix.
-	for _, tile := range []int{0, 256, 300, 128, 64, 32, 96, 160, 224} {
-		if bad := wrong(tile); bad != 0 {
-			t.Errorf("tile %d: %d of %d pixels wrong, and this grid was exact",
-				tile, bad, n*n)
+	// EVERY grid, reversible. This is a gate: the encoder is given the tile's
+	// position now, and a tile grid that does not survive a lossless round
+	// trip is a defect, not a known limit.
+	lossless := &EncodeOptions{Lossless: true}
+	for _, tile := range []int{
+		0, 256, 300, 224, 200, 160, 129, 128, 120, 100, 96, 80, 64, 48, 32, 255,
+	} {
+		if bad := wrong(tile, lossless); bad != 0 {
+			t.Errorf("reversible, tile %d: %d of %d pixels wrong", tile, bad, n*n)
 		}
 	}
 
-	// Known wrong, reported not asserted. The count is logged so that a fix
-	// shows up as these going to zero rather than as a test nobody changed.
-	for _, tile := range []int{100, 120, 48, 80, 129, 200, 255} {
-		t.Logf("tile %d: %d of %d pixels wrong -- the lifting phase, still to fix",
-			tile, wrong(tile), n*n)
+	// The irreversible filter shares the block grid, the subband layout and
+	// the quantiser's idea of where a subband is, and all three are fixed. Two
+	// grids are still not exact and are REPORTED rather than asserted: both
+	// have a tile whose extent falls to zero at a coarse resolution, which is
+	// the shape that was wrong last and may be wrong still.
+	lossy := &EncodeOptions{Quality: 1.0}
+	for _, tile := range []int{0, 256, 128, 96, 100, 64, 32} {
+		if bad := wrong(tile, lossy); bad != 0 {
+			t.Errorf("irreversible, tile %d: %d of %d pixels past 12 levels", tile, bad, n*n)
+		}
+	}
+	for _, tile := range []int{120, 255} {
+		t.Logf("irreversible, tile %d: %d of %d pixels past 12 levels -- still to fix",
+			tile, wrong(tile, lossy), n*n)
 	}
 }

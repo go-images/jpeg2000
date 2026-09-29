@@ -359,7 +359,7 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 	// Forward DWT
 	if e.opts.Lossless {
 		for c := 0; c < e.numComps; c++ {
-			Analyze2D_53(tileComps[c], tw, th, numLevels)
+			Analyze2D_53_At(tileComps[c], tx0, ty0, tx1, ty1, numLevels)
 		}
 	} else {
 		// For lossy, work in float64 for DWT then quantize
@@ -371,12 +371,12 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 					fcoeffs[y][x] = float64(tileComps[c][y][x])
 				}
 			}
-			Analyze2D_97(fcoeffs, tw, th, numLevels)
+			Analyze2D_97_At(fcoeffs, tx0, ty0, tx1, ty1, numLevels)
 
 			// Quantize subbands
 			// For simplicity, apply a single step size per subband
 			stepSizes := defaultStepSizes(e.opts.Quality, numLevels, e.bitDepth)
-			tileComps[c] = e.quantizeSubbands(fcoeffs, tw, th, numLevels, stepSizes)
+			tileComps[c] = e.quantizeSubbands(fcoeffs, tx0, ty0, tx1, ty1, numLevels, stepSizes)
 		}
 	}
 
@@ -395,6 +395,17 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 		resolutions[c] = make([]*EncoderResolution, numResolutions)
 
 		for r := range numResolutions {
+			// A resolution with no extent has no precincts and therefore no
+			// packets: the decoder computes numPrecincts from trX1-trX0 and
+			// gets zero, so a packet written here would leave the two out of
+			// step for the rest of the tile. It is not a rare shape -- a tile
+			// 16 wide is empty at the coarsest of five resolutions, and every
+			// grid whose last tile is 16 wide was wrong for this reason.
+			nb := numLevels - r
+			if ceilShift(tx1, nb)-ceilShift(tx0, nb) <= 0 ||
+				ceilShift(ty1, nb)-ceilShift(ty0, nb) <= 0 {
+				continue
+			}
 			res := &EncoderResolution{Level: r}
 
 			// Determine which subbands belong to this resolution.
@@ -421,8 +432,16 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 				if sbIdx >= 3*numLevels+1 {
 					continue
 				}
-				sbType, sbX0, sbY0, sbW, sbH := subbandBounds(sbIdx, numLevels, tw, th)
+				sbType, sbX0, sbY0, sbW, sbH := subbandBoundsAt(sbIdx, numLevels, tx0, ty0, tx1, ty1)
 				if sbW <= 0 || sbH <= 0 {
+					// An empty subband inside a resolution that is NOT empty
+					// still takes part in packet iteration, so it gets a
+					// subband with no code-blocks. A resolution that is itself
+					// empty is skipped whole, above -- the decoder counts no
+					// precincts for it and so expects no packet at all, not an
+					// empty one.
+					res.Subbands = append(res.Subbands,
+						NewEncoderSubband(sbType, max(sbW, 0), max(sbH, 0), 0, 0))
 					continue
 				}
 
@@ -566,14 +585,19 @@ func (e *encoder) encodeTile(components [][][]int32, tileX, tileY, numLevels int
 }
 
 // quantizeSubbands applies dead-zone quantization to each subband of a DWT-transformed tile.
-func (e *encoder) quantizeSubbands(coeffs [][]float64, width, height, numLevels int, stepSizes []float64) [][]int32 {
+func (e *encoder) quantizeSubbands(coeffs [][]float64, tcx0, tcy0, tcx1, tcy1, numLevels int, stepSizes []float64) [][]int32 {
+	width, height := tcx1-tcx0, tcy1-tcy0
 	result := make([][]int32, height)
 	for y := range height {
 		result[y] = make([]int32, width)
 	}
 
+	// The subband a step size belongs to sits where the TRANSFORM left it, and
+	// that depends on where the tile begins -- see subbandBoundsAt. Quantising
+	// by the size alone applies each step to the wrong region of every tile
+	// but the first.
 	for sbIdx := 0; sbIdx < 3*numLevels+1; sbIdx++ {
-		_, sbX0, sbY0, sbW, sbH := subbandBounds(sbIdx, numLevels, width, height)
+		_, sbX0, sbY0, sbW, sbH := subbandBoundsAt(sbIdx, numLevels, tcx0, tcy0, tcx1, tcy1)
 		if sbW <= 0 || sbH <= 0 {
 			continue
 		}

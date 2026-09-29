@@ -449,29 +449,43 @@ func analyze1D_53(data []int32) {
 
 // analyze1D_97 performs forward 1D 9/7 wavelet transform (for testing)
 // Uses float64 SIMD primitives while preserving JPEG2000's non-standard scaling.
-func analyze1D_97(data []float64) {
+func analyze1D_97(data []float64) { analyze1D_97_cas(data, 0) }
+
+// analyze1D_97_cas is the forward 9/7 transform of a signal whose first sample
+// sits at an EVEN position (cas=0) or an odd one (cas=1).
+//
+// It mirrors synthesize1D_97_cas: the lifting steps run in the reverse order
+// with negated coefficients, and the phase each step is given follows the same
+// rule -- cas where the synthesis writes the high band from the low, 1-cas the
+// other way. The subband lengths swap with cas for the same reason they do
+// there: which of the two bands the first sample belongs to is what cas says.
+func analyze1D_97_cas(data []float64, cas int) {
 	n := len(data)
 	if n <= 1 {
 		return
 	}
 
 	half := (n + 1) / 2
+	dn := n - half
+	if cas != 0 {
+		half, dn = dn, half
+	}
 
 	low := make([]float64, half)
-	high := make([]float64, n-half)
-	wavelet.Deinterleave(data, low, half, high, n-half, 0)
+	high := make([]float64, dn)
+	wavelet.Deinterleave(data, low, half, high, dn, cas)
 
 	// Forward lifting steps (SIMD-accelerated on float64)
 	// Forward uses += coeff*(neighbors), LiftStep97 does -= coeff*(neighbors),
 	// so negate coefficients for forward direction.
-	wavelet.LiftStep97(high, n-half, low, half, -lift97Alpha, 0)
-	wavelet.LiftStep97(low, half, high, n-half, -lift97Beta, 1)
-	wavelet.LiftStep97(high, n-half, low, half, -lift97Gamma, 0)
-	wavelet.LiftStep97(low, half, high, n-half, -lift97Delta, 1)
+	wavelet.LiftStep97(high, dn, low, half, -lift97Alpha, cas)
+	wavelet.LiftStep97(low, half, high, dn, -lift97Beta, 1-cas)
+	wavelet.LiftStep97(high, dn, low, half, -lift97Gamma, cas)
+	wavelet.LiftStep97(low, half, high, dn, -lift97Delta, 1-cas)
 
 	// JPEG2000 scaling: low /= K, high *= K/2
 	wavelet.ScaleSlice(low, half, 1.0/lift97K)
-	wavelet.ScaleSlice(high, n-half, lift97K/2.0)
+	wavelet.ScaleSlice(high, dn, lift97K/2.0)
 
 	// Pack [low | high] back
 	copy(data[:half], low)
