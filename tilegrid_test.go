@@ -18,10 +18,27 @@ import (
 // two, origins that are multiples of 2^levels, and subbands that sit off the
 // code-block grid).
 //
-// It asserts only what is known: the grids in the first list are exact today
-// and must stay exact. The second list is NOT asserted -- pinning a defect
-// makes it permanent, and these are expected to become exact when the encoder
-// is taught the tile's position.
+// The mechanism IS established now, by a predictor written from the two
+// implementations and tested against every case here rather than from the
+// shape of a few. The encoder is handed the tile's size and never its
+// position, and that costs it twice:
+//
+//	code-block count -- the encoder wrote ceil(sbW/cbw) blocks where the
+//	decoder counts the grid cells the subband SPANS on a grid anchored at
+//	the reference grid's origin (T.800 B.7). FIXED: see blockGrid.
+//
+//	DWT lifting phase -- Synthesize2D_*_WithDims takes each resolution's
+//	X0/Y0 "for cas calculation"; Analyze2D_* takes only a size, so the
+//	forward transform always works as though the tile began at zero. NOT
+//	yet fixed.
+//
+// `blocks || phase` predicts all fifteen grids below. Tile 96 is the case that
+// refuted four earlier theories: a code-block divergence with NO phase
+// divergence, which no rule about origins could see. It is exact now.
+//
+// The second list is still NOT asserted -- pinning a defect makes it
+// permanent, and these become exact when the forward transform is taught the
+// phase.
 func TestWhichTileGridsSurviveARoundTrip(t *testing.T) {
 	const n = 256
 	src := image.NewGray(image.Rect(0, 0, n, n))
@@ -54,7 +71,7 @@ func TestWhichTileGridsSurviveARoundTrip(t *testing.T) {
 
 	// Exact today. A change that breaks one of these has broken tiling
 	// further, whatever it was meant to fix.
-	for _, tile := range []int{0, 256, 300, 128, 64, 32, 160, 224} {
+	for _, tile := range []int{0, 256, 300, 128, 64, 32, 96, 160, 224} {
 		if bad := wrong(tile); bad != 0 {
 			t.Errorf("tile %d: %d of %d pixels wrong, and this grid was exact",
 				tile, bad, n*n)
@@ -63,8 +80,8 @@ func TestWhichTileGridsSurviveARoundTrip(t *testing.T) {
 
 	// Known wrong, reported not asserted. The count is logged so that a fix
 	// shows up as these going to zero rather than as a test nobody changed.
-	for _, tile := range []int{96, 100, 120, 48, 80, 129, 200, 255} {
-		t.Logf("tile %d: %d of %d pixels wrong (known, see the note in packet.go)",
+	for _, tile := range []int{100, 120, 48, 80, 129, 200, 255} {
+		t.Logf("tile %d: %d of %d pixels wrong -- the lifting phase, still to fix",
 			tile, wrong(tile), n*n)
 	}
 }
