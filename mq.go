@@ -132,9 +132,10 @@ func newMQDecoder(data []byte) *mqDecoder {
 // This matches OpenJPEG's opj_mqc_init_dec:
 // 1. Read first byte (data[0]) into C at bits [16-23], pos stays at 0
 // 2. Call bytein which:
-//    - Looks at current byte (data[0]) to check for 0xFF
-//    - Adds the NEXT byte (data[1]) to C at bits [8-15]
-//    - Advances pos to 1
+//   - Looks at current byte (data[0]) to check for 0xFF
+//   - Adds the NEXT byte (data[1]) to C at bits [8-15]
+//   - Advances pos to 1
+//
 // 3. Shift C left by 7, decrement CT by 7
 // 4. Set A = 0x8000
 //

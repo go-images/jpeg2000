@@ -449,10 +449,10 @@ func TestMultiComponentImage(t *testing.T) {
 
 func TestParseTLM(t *testing.T) {
 	tests := []struct {
-		name           string
-		stlm           byte // Stlm value: bits 5-4 = ST, bit 6 = SP
-		entries        []TLMEntry
-		wantLen        int
+		name    string
+		stlm    byte // Stlm value: bits 5-4 = ST, bit 6 = SP
+		entries []TLMEntry
+		wantLen int
 	}{
 		{
 			name: "16-bit tile index, 32-bit length",

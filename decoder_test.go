@@ -29,12 +29,12 @@ func TestExtractCodestream_JP2Container(t *testing.T) {
 	var buf bytes.Buffer
 
 	// JP2 Signature Box
-	binary.Write(&buf, binary.BigEndian, uint32(12))      // Length
-	binary.Write(&buf, binary.BigEndian, uint32(0x6A5020)) // "jP " (incomplete for test)
+	binary.Write(&buf, binary.BigEndian, uint32(12))         // Length
+	binary.Write(&buf, binary.BigEndian, uint32(0x6A5020))   // "jP " (incomplete for test)
 	binary.Write(&buf, binary.BigEndian, uint32(0x0D0A870A)) // Signature
 
 	// File Type Box
-	binary.Write(&buf, binary.BigEndian, uint32(20))        // Length
+	binary.Write(&buf, binary.BigEndian, uint32(20))         // Length
 	binary.Write(&buf, binary.BigEndian, uint32(0x66747970)) // "ftyp"
 	binary.Write(&buf, binary.BigEndian, uint32(0x6A703220)) // Brand: "jp2 "
 	binary.Write(&buf, binary.BigEndian, uint32(0))          // Minor version
@@ -43,7 +43,7 @@ func TestExtractCodestream_JP2Container(t *testing.T) {
 	// Codestream Box
 	codestreamData := []byte{0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x00}
 	csBoxLen := uint32(8 + len(codestreamData))
-	binary.Write(&buf, binary.BigEndian, csBoxLen)         // Length
+	binary.Write(&buf, binary.BigEndian, csBoxLen)           // Length
 	binary.Write(&buf, binary.BigEndian, uint32(0x6A703263)) // "jp2c"
 	buf.Write(codestreamData)
 
@@ -105,19 +105,19 @@ func TestDecodeConfig(t *testing.T) {
 	binary.Write(&buf, binary.BigEndian, uint16(markerSIZ))
 	sizLen := uint16(41) // Minimal SIZ for 1 component
 	binary.Write(&buf, binary.BigEndian, sizLen)
-	binary.Write(&buf, binary.BigEndian, uint16(0))       // Rsiz (capabilities)
-	binary.Write(&buf, binary.BigEndian, uint32(640))     // Xsiz (width)
-	binary.Write(&buf, binary.BigEndian, uint32(480))     // Ysiz (height)
-	binary.Write(&buf, binary.BigEndian, uint32(0))       // XOsiz
-	binary.Write(&buf, binary.BigEndian, uint32(0))       // YOsiz
-	binary.Write(&buf, binary.BigEndian, uint32(640))     // XTsiz (tile width)
-	binary.Write(&buf, binary.BigEndian, uint32(480))     // YTsiz (tile height)
-	binary.Write(&buf, binary.BigEndian, uint32(0))       // XTOsiz
-	binary.Write(&buf, binary.BigEndian, uint32(0))       // YTOsiz
-	binary.Write(&buf, binary.BigEndian, uint16(1))       // Csiz (num components)
-	binary.Write(&buf, binary.BigEndian, uint8(7))        // Ssiz[0] (bit depth - 1)
-	binary.Write(&buf, binary.BigEndian, uint8(1))        // XRsiz[0]
-	binary.Write(&buf, binary.BigEndian, uint8(1))        // YRsiz[0]
+	binary.Write(&buf, binary.BigEndian, uint16(0))   // Rsiz (capabilities)
+	binary.Write(&buf, binary.BigEndian, uint32(640)) // Xsiz (width)
+	binary.Write(&buf, binary.BigEndian, uint32(480)) // Ysiz (height)
+	binary.Write(&buf, binary.BigEndian, uint32(0))   // XOsiz
+	binary.Write(&buf, binary.BigEndian, uint32(0))   // YOsiz
+	binary.Write(&buf, binary.BigEndian, uint32(640)) // XTsiz (tile width)
+	binary.Write(&buf, binary.BigEndian, uint32(480)) // YTsiz (tile height)
+	binary.Write(&buf, binary.BigEndian, uint32(0))   // XTOsiz
+	binary.Write(&buf, binary.BigEndian, uint32(0))   // YTOsiz
+	binary.Write(&buf, binary.BigEndian, uint16(1))   // Csiz (num components)
+	binary.Write(&buf, binary.BigEndian, uint8(7))    // Ssiz[0] (bit depth - 1)
+	binary.Write(&buf, binary.BigEndian, uint8(1))    // XRsiz[0]
+	binary.Write(&buf, binary.BigEndian, uint8(1))    // YRsiz[0]
 
 	// EOC marker
 	binary.Write(&buf, binary.BigEndian, uint16(markerEOC))
@@ -150,16 +150,16 @@ func TestDecodeConfig_RGB(t *testing.T) {
 	binary.Write(&buf, binary.BigEndian, uint16(markerSIZ))
 	sizLen := uint16(41 + 6) // Base + 2 extra components * 3 bytes
 	binary.Write(&buf, binary.BigEndian, sizLen)
-	binary.Write(&buf, binary.BigEndian, uint16(0))       // Rsiz
-	binary.Write(&buf, binary.BigEndian, uint32(640))     // Xsiz
-	binary.Write(&buf, binary.BigEndian, uint32(480))     // Ysiz
-	binary.Write(&buf, binary.BigEndian, uint32(0))       // XOsiz
-	binary.Write(&buf, binary.BigEndian, uint32(0))       // YOsiz
-	binary.Write(&buf, binary.BigEndian, uint32(640))     // XTsiz
-	binary.Write(&buf, binary.BigEndian, uint32(480))     // YTsiz
-	binary.Write(&buf, binary.BigEndian, uint32(0))       // XTOsiz
-	binary.Write(&buf, binary.BigEndian, uint32(0))       // YTOsiz
-	binary.Write(&buf, binary.BigEndian, uint16(3))       // Csiz (3 components = RGB)
+	binary.Write(&buf, binary.BigEndian, uint16(0))   // Rsiz
+	binary.Write(&buf, binary.BigEndian, uint32(640)) // Xsiz
+	binary.Write(&buf, binary.BigEndian, uint32(480)) // Ysiz
+	binary.Write(&buf, binary.BigEndian, uint32(0))   // XOsiz
+	binary.Write(&buf, binary.BigEndian, uint32(0))   // YOsiz
+	binary.Write(&buf, binary.BigEndian, uint32(640)) // XTsiz
+	binary.Write(&buf, binary.BigEndian, uint32(480)) // YTsiz
+	binary.Write(&buf, binary.BigEndian, uint32(0))   // XTOsiz
+	binary.Write(&buf, binary.BigEndian, uint32(0))   // YTOsiz
+	binary.Write(&buf, binary.BigEndian, uint16(3))   // Csiz (3 components = RGB)
 
 	// Component 0 (R)
 	binary.Write(&buf, binary.BigEndian, uint8(7)) // 8-bit

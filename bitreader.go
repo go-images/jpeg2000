@@ -13,12 +13,12 @@ import (
 // After reading a 0xFF byte, the MSB of the next byte is a stuffed
 // 0-bit that must be skipped. This prevents accidental marker sequences.
 type bitReader struct {
-	data       []byte
-	pos        int  // byte position
-	bitPos     uint // bit position within current byte (0-7), reads MSB first
-	bitStuff   bool // enable 0xFF bit-stuffing mode
-	prevWasFF  bool // previous byte was 0xFF (for bit-stuffing)
-	hitMarker  bool // true if we've hit a marker sequence (0xFF followed by 0x80-0xFF)
+	data      []byte
+	pos       int  // byte position
+	bitPos    uint // bit position within current byte (0-7), reads MSB first
+	bitStuff  bool // enable 0xFF bit-stuffing mode
+	prevWasFF bool // previous byte was 0xFF (for bit-stuffing)
+	hitMarker bool // true if we've hit a marker sequence (0xFF followed by 0x80-0xFF)
 }
 
 // newBitReader creates a new bit reader from the given data.
