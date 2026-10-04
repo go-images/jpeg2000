@@ -23,3 +23,51 @@ carried here are stated:
               Files: color.go (convertToCMYK, convertToCMYKFloat, sameShape),
               decoder.go (isCMYK, picture, pictureUpsampled, toCMYK),
               cmyk_test.go, go.mod (module path).
+
+  2026-09-29  A tile is given its position in the reference grid, so a
+              multi-tile encode round-trips. The encoder anchored a tile's
+              code-block grid at the tile's own origin where ITU-T T.800 B.7
+              anchors it at the REFERENCE grid's, and it computed subband
+              extents from a tile's size rather than from its coordinates
+              (B-14, B-15). Measured over sixteen tile grids of a 300x300
+              image, reversible: EIGHT of the sixteen did not survive a
+              lossless round trip, and none does now. Six of them were read
+              back by OpenJPEG's opj_decompress as well, including a grid
+              whose last tile is one pixel wide. A one-row resolution is also
+              scaled in the forward transform the way the inverse already
+              scaled it (Table F.4), and a tile whose coefficients all
+              quantise away is written and read rather than refused -- that
+              refusal was "no packet data read", and an empty tile is a legal
+              tile.
+
+              Files: blockgrid.go (new), dwt_encode.go, encoder.go, packet.go,
+              tilegrid_test.go (new), blockgrid_test.go (new).
+
+  2026-09-28  A decode holds far less memory, and a one-component picture
+              comes back as one byte a pixel. Measured against the same
+              pictures: a grey page went from 19.8 to 8.6 bytes a pixel
+              (917 MB peak to 397 MB) and a colour one from 76.4 to 20.2
+              (2 416 MB to 638 MB). Four things did it: a component's rows
+              come out of one allocation rather than one per row; a
+              whole-component tile's coefficients are handed over instead of
+              copied; the 9/7 path holds ONE buffer a component where it held
+              two, by reinterpreting the int32 plane as float32 in place, the
+              way OpenJPEG's tcd.c does; and the inverse ICT is held a band of
+              rows at a time rather than a page. The 9/7 coefficients are also
+              carried at the precision the reference carries them.
+
+              Files: view.go (new), decoder.go, dwt.go, color.go, tile.go,
+              view_test.go (new).
+
+  2026-09-26  A codestream whose component origin is odd no longer crashes the
+              9/7 synthesis, and the vertical pass takes eight columns at a
+              time through go-highway. Behaviour is bit-for-bit as before
+              where it did not crash.
+
+              Files: dwt.go, color.go, ebcot.go.
+
+  Also: the tests now run on macOS, Windows, 386, arm, ppc64le, riscv64,
+  s390x and loong64, which upstream only ever cross-compiled; the 386 lane
+  runs natively because qemu-i386 loses float state. No behaviour of the
+  library is changed by that, and it is stated because it is why several of
+  the fixes above were found.
