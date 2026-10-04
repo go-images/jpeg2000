@@ -6,14 +6,28 @@
 > The import path is `github.com/go-images/jpeg2000`. Every change made here
 > is stated in [NOTICE](NOTICE), as Apache-2.0 section 4(b) requires.
 >
-> **What differs today:** a four-component picture whose JP2 header declares
-> the enumerated colour space **CMYK** decodes to an `*image.CMYK` instead of
-> an `*image.RGBA` built from its first three components — which discarded the
-> black plate. Measured against poppler on the reference picture: **255 levels
-> of disagreement on every pixel became at most 2**, over 2 440 044 samples.
+> **What differs today**, with every change stated in full in
+> [NOTICE](NOTICE):
+>
+> - A four-component picture whose JP2 header declares the enumerated colour
+>   space **CMYK** decodes to an `*image.CMYK` instead of an `*image.RGBA`
+>   built from its first three components — which discarded the black plate.
+>   **255 levels of disagreement on every pixel became at most 2**, over
+>   2 440 044 samples.
+> - **A multi-tile encode round-trips.** Eight of sixteen tile grids did not
+>   survive a lossless round trip; none fails now, and six were read back by
+>   OpenJPEG's `opj_decompress` as well.
+> - **A decode holds a quarter of the memory**: 19.8 → **8.6 bytes a pixel** on
+>   a grey page, 76.4 → **20.2** on a colour one. A one-component picture comes
+>   back as one byte a pixel.
+> - A codestream whose component origin is odd no longer crashes, and a tile
+>   whose coefficients all quantise away is written and read rather than
+>   refused.
+> - The tests run on eight architectures and three operating systems, where
+>   upstream only ever cross-compiled.
 
 
-[![Go](https://github.com/ajroetker/go-jpeg2000/actions/workflows/go.yml/badge.svg)](https://github.com/ajroetker/go-jpeg2000/actions/workflows/go.yml)
+[![Go](https://github.com/go-images/jpeg2000/actions/workflows/go.yml/badge.svg)](https://github.com/go-images/jpeg2000/actions/workflows/go.yml)
 
 A pure Go JPEG2000 codec. Decode and encode JPEG2000 codestreams (.j2k/.j2c) and JP2 files (.jp2) with zero C dependencies.
 
@@ -24,7 +38,7 @@ A pure Go JPEG2000 codec. Decode and encode JPEG2000 codestreams (.j2k/.j2c) and
 ## Installation
 
 ```bash
-go get github.com/ajroetker/go-jpeg2000
+go get github.com/go-images/jpeg2000
 ```
 
 ## Quick Start
@@ -39,7 +53,7 @@ import (
 	"log"
 	"os"
 
-	jpeg2000 "github.com/ajroetker/go-jpeg2000"
+	jpeg2000 "github.com/go-images/jpeg2000"
 )
 
 func main() {
@@ -71,7 +85,7 @@ import (
 	"log"
 	"os"
 
-	jpeg2000 "github.com/ajroetker/go-jpeg2000"
+	jpeg2000 "github.com/go-images/jpeg2000"
 )
 
 func main() {
@@ -104,7 +118,7 @@ func main() {
 ```go
 import (
 	"image"
-	_ "github.com/ajroetker/go-jpeg2000" // register format
+	_ "github.com/go-images/jpeg2000" // register format
 )
 
 img, format, err := image.Decode(reader) // format = "jpeg2000"
@@ -126,7 +140,8 @@ img, format, err := image.Decode(reader) // format = "jpeg2000"
 | Rate control (PCRD-opt) | Supported |
 | Quality layers | Supported |
 | Grayscale and RGB images | Supported |
-| Multi-tile images | Supported |
+| Multi-tile images | Supported — **every one of sixteen tile grids survives a lossless round trip**, which `tilegrid_test.go` asserts as a gate |
+| A one-pixel tile, lossy | **Not** — the grid that leaves a 1×1 corner tile loses that tile's single coefficient and decodes it to 128, the DC level shift. Pre-existing (the same at v0.12.2 and v0.13.0); reported by `tilegrid_test.go` rather than asserted, so that pinning it does not make it permanent |
 
 ## Encode Options
 
