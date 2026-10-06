@@ -19,7 +19,7 @@ A pure Go JPEG2000 codec. Decode and encode JPEG2000 codestreams (.j2k/.j2c) and
 
 ## Requirements
 
-- Go 1.25+
+- Go 1.27+
 
 ## Installation
 
