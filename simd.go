@@ -17,8 +17,8 @@ package jpeg2000
 import (
 	"sync"
 
-	"github.com/ajroetker/go-highway/hwy"
-	"github.com/ajroetker/go-highway/hwy/contrib/image"
+	"github.com/go-simd/highway/hwy"
+	"github.com/go-simd/highway/hwy/contrib/image"
 )
 
 // slicesToImage converts a 2D slice to a SIMD-aligned Image.

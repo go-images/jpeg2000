@@ -3,7 +3,7 @@ package jpeg2000
 import (
 	"image"
 
-	hwyimage "github.com/ajroetker/go-highway/hwy/contrib/image"
+	hwyimage "github.com/go-simd/highway/hwy/contrib/image"
 )
 
 // applyRCT applies inverse Reversible Color Transform (lossless)

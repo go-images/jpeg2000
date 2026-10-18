@@ -17,7 +17,7 @@ package jpeg2000
 import (
 	"testing"
 
-	hwyimage "github.com/ajroetker/go-highway/hwy/contrib/image"
+	hwyimage "github.com/go-simd/highway/hwy/contrib/image"
 )
 
 // Scalar implementations (original code before SIMD)

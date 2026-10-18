@@ -1,4 +1,4 @@
-github.com/ajroetker/go-highway v0.0.12 h1:OcGp/l/W7WQtH5ELLuNnKXCuR7ePpWGh2RWZI/INtck=
-github.com/ajroetker/go-highway v0.0.12/go.mod h1:un7fcrwix7UOHJrr18Lgh5eeF+1yaZiGWdTw3FbfDv4=
+github.com/go-simd/highway v0.0.13 h1:BSex+I3TnOzbPfU59wvBzn1ZsULiq7oEpgALA7BGlHo=
+github.com/go-simd/highway v0.0.13/go.mod h1:9azxZ9KzseClxeRCx++28rwHQEL1uiAM/AC+ErA+Lv8=
 golang.org/x/sys v0.44.0 h1:ildZl3J4uzeKP07r2F++Op7E9B29JRUy+a27EibtBTQ=
 golang.org/x/sys v0.44.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
