@@ -85,3 +85,9 @@ Changes that leave the output identical (speed, memory, dependencies):
                              since nothing sets GOEXPERIMENT=simd) and 2.1x
                              slower on arm64 (the plane conversions). color.go,
                              simd.go, rct_test.go, color_bench_test.go.
+  2026-10-18  #34            the inverse 5/3 wavelet is a plain loop, its
+                             vertical pass a whole row at a time and in place;
+                             highway's path allocated in every vector operation
+                             on amd64 (a lossless 1080p decode: 638 ms and
+                             14.55 M allocations, now 269 ms and 93 k). dwt.go,
+                             dwt53_test.go, decode_bench_test.go.
