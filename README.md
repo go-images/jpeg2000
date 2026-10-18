@@ -6,14 +6,26 @@
 > The import path is `github.com/go-images/jpeg2000`. Every change made here
 > is stated in [NOTICE](NOTICE), as Apache-2.0 section 4(b) requires.
 >
-> **What differs today:** a four-component picture whose JP2 header declares
-> the enumerated colour space **CMYK** decodes to an `*image.CMYK` instead of
-> an `*image.RGBA` built from its first three components — which discarded the
-> black plate. Measured against poppler on the reference picture: **255 levels
-> of disagreement on every pixel became at most 2**, over 2 440 044 samples.
+> **What differs today** (the full list, with the files, is in NOTICE):
+>
+> - a four-component picture whose JP2 header declares the enumerated colour
+>   space **CMYK** decodes to an `*image.CMYK`, not an `*image.RGBA` built from
+>   its first three components, which discarded the black plate. Against
+>   poppler on the reference picture, **255 levels of disagreement on every
+>   pixel became at most 2**, over 2 440 044 samples;
+> - six decoder and encoder corrections: an odd origin no longer crashes the
+>   9/7 synthesis; 9/7 coefficients are carried as float32, as OpenJPEG
+>   carries them; tiled encodes place their code blocks and tiles where the
+>   decoder and OpenJPEG read them; a tile whose blocks all quantise away is
+>   accepted;
+> - the SIMD dependency is [go-simd/highway](https://github.com/go-simd/highway),
+>   a fork of go-highway that consumers can `go mod tidy` against;
+> - the lossless colour transform is a plain loop, **22.8× faster on amd64
+>   and 2.1× on arm64** than the highway path it replaced for a 4K frame
+>   (6 allocations instead of 12.45 million on amd64);
+> - many decode-speed and memory changes that leave the output identical.
 
-
-[![Go](https://github.com/ajroetker/go-jpeg2000/actions/workflows/go.yml/badge.svg)](https://github.com/ajroetker/go-jpeg2000/actions/workflows/go.yml)
+[![Go](https://github.com/go-images/jpeg2000/actions/workflows/go.yml/badge.svg)](https://github.com/go-images/jpeg2000/actions/workflows/go.yml)
 
 A pure Go JPEG2000 codec. Decode and encode JPEG2000 codestreams (.j2k/.j2c) and JP2 files (.jp2) with zero C dependencies.
 
@@ -24,7 +36,7 @@ A pure Go JPEG2000 codec. Decode and encode JPEG2000 codestreams (.j2k/.j2c) and
 ## Installation
 
 ```bash
-go get github.com/ajroetker/go-jpeg2000
+go get github.com/go-images/jpeg2000
 ```
 
 ## Quick Start
@@ -39,7 +51,7 @@ import (
 	"log"
 	"os"
 
-	jpeg2000 "github.com/ajroetker/go-jpeg2000"
+	"github.com/go-images/jpeg2000"
 )
 
 func main() {
@@ -71,7 +83,7 @@ import (
 	"log"
 	"os"
 
-	jpeg2000 "github.com/ajroetker/go-jpeg2000"
+	"github.com/go-images/jpeg2000"
 )
 
 func main() {
@@ -104,7 +116,7 @@ func main() {
 ```go
 import (
 	"image"
-	_ "github.com/ajroetker/go-jpeg2000" // register format
+	_ "github.com/go-images/jpeg2000" // register format
 )
 
 img, format, err := image.Decode(reader) // format = "jpeg2000"
