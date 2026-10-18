@@ -12,6 +12,14 @@ import (
 // Cb = B - G            =>  B = Cb + G
 // Cr = R - G            =>  R = Cr + G
 func applyRCT(y, cb, cr [][]int32) (r, g, b [][]int32) {
+	if !rctHighway {
+		return applyRCTScalar(y, cb, cr)
+	}
+	return applyRCTHighway(y, cb, cr)
+}
+
+// applyRCTHighway is applyRCT through highway's vector kernel.
+func applyRCTHighway(y, cb, cr [][]int32) (r, g, b [][]int32) {
 	height := len(y)
 	if height == 0 {
 		return nil, nil, nil
@@ -35,6 +43,60 @@ func applyRCT(y, cb, cr [][]int32) (r, g, b [][]int32) {
 	b = imageToSlices(buf.imgs[5])
 
 	return r, g, b
+}
+
+// applyRCTScalar is applyRCT as a plain loop, for the builds where highway
+// has no vector kernel to offer (see rct_scalar.go). Each output plane is one
+// allocation, sliced into rows.
+func applyRCTScalar(y, cb, cr [][]int32) (r, g, b [][]int32) {
+	height := len(y)
+	if height == 0 {
+		return nil, nil, nil
+	}
+	width := len(y[0])
+	r, g, b = int32Plane(width, height), int32Plane(width, height), int32Plane(width, height)
+	for i := range height {
+		yRow, cbRow, crRow := y[i][:width], cb[i][:width], cr[i][:width]
+		rRow, gRow, bRow := r[i], g[i], b[i]
+		for j := range width {
+			gv := yRow[j] - ((cbRow[j] + crRow[j]) >> 2)
+			gRow[j] = gv
+			rRow[j] = crRow[j] + gv
+			bRow[j] = cbRow[j] + gv
+		}
+	}
+	return r, g, b
+}
+
+// forwardRCTScalar is forwardRCT as a plain loop; see applyRCTScalar.
+func forwardRCTScalar(r, g, b [][]int32) (y, cb, cr [][]int32) {
+	height := len(r)
+	if height == 0 {
+		return nil, nil, nil
+	}
+	width := len(r[0])
+	y, cb, cr = int32Plane(width, height), int32Plane(width, height), int32Plane(width, height)
+	for i := range height {
+		rRow, gRow, bRow := r[i][:width], g[i][:width], b[i][:width]
+		yRow, cbRow, crRow := y[i], cb[i], cr[i]
+		for j := range width {
+			rv, gv, bv := rRow[j], gRow[j], bRow[j]
+			yRow[j] = (rv + 2*gv + bv) >> 2
+			cbRow[j] = bv - gv
+			crRow[j] = rv - gv
+		}
+	}
+	return y, cb, cr
+}
+
+// int32Plane returns height rows of width samples over one backing array.
+func int32Plane(width, height int) [][]int32 {
+	data := make([]int32, width*height)
+	rows := make([][]int32, height)
+	for i := range rows {
+		rows[i] = data[i*width : (i+1)*width : (i+1)*width]
+	}
+	return rows
 }
 
 // applyICT applies inverse Irreversible Color Transform (lossy)
@@ -78,6 +140,14 @@ func applyICT(y, cb, cr [][]float64) (r, g, b [][]float64) {
 // This is the exact inverse of applyRCT: forwardRCT followed by applyRCT
 // yields the original RGB values (lossless round-trip).
 func forwardRCT(r, g, b [][]int32) (y, cb, cr [][]int32) {
+	if !rctHighway {
+		return forwardRCTScalar(r, g, b)
+	}
+	return forwardRCTHighway(r, g, b)
+}
+
+// forwardRCTHighway is forwardRCT through highway's vector kernel.
+func forwardRCTHighway(r, g, b [][]int32) (y, cb, cr [][]int32) {
 	height := len(r)
 	if height == 0 {
 		return nil, nil, nil

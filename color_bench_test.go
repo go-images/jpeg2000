@@ -20,59 +20,8 @@ import (
 	hwyimage "github.com/go-simd/highway/hwy/contrib/image"
 )
 
-// Scalar implementations (original code before SIMD)
-
-func applyRCTScalar(y, cb, cr [][]int32) (r, g, b [][]int32) {
-	height := len(y)
-	if height == 0 {
-		return nil, nil, nil
-	}
-	width := len(y[0])
-
-	r = make([][]int32, height)
-	g = make([][]int32, height)
-	b = make([][]int32, height)
-
-	for i := range height {
-		r[i] = make([]int32, width)
-		g[i] = make([]int32, width)
-		b[i] = make([]int32, width)
-
-		for j := range width {
-			g[i][j] = y[i][j] - ((cb[i][j] + cr[i][j]) >> 2)
-			r[i][j] = cr[i][j] + g[i][j]
-			b[i][j] = cb[i][j] + g[i][j]
-		}
-	}
-
-	return r, g, b
-}
-
-func forwardRCTScalar(r, g, b [][]int32) (y, cb, cr [][]int32) {
-	height := len(r)
-	if height == 0 {
-		return nil, nil, nil
-	}
-	width := len(r[0])
-
-	y = make([][]int32, height)
-	cb = make([][]int32, height)
-	cr = make([][]int32, height)
-
-	for i := range height {
-		y[i] = make([]int32, width)
-		cb[i] = make([]int32, width)
-		cr[i] = make([]int32, width)
-
-		for j := range width {
-			y[i][j] = (r[i][j] + 2*g[i][j] + b[i][j]) >> 2
-			cb[i][j] = b[i][j] - g[i][j]
-			cr[i][j] = r[i][j] - g[i][j]
-		}
-	}
-
-	return y, cb, cr
-}
+// Scalar implementations (original code before SIMD). The RCT pair lives in
+// color.go now, because it is what the shipped build runs (rct_scalar.go).
 
 func applyICTScalar(y, cb, cr [][]float64) (r, g, b [][]float64) {
 	height := len(y)
