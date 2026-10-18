@@ -21,7 +21,9 @@ import (
 )
 
 // Scalar implementations (original code before SIMD). The RCT pair lives in
-// color.go now, because it is what the shipped build runs (rct_scalar.go).
+// color.go now, because it is what ships (see applyRCT). Since then the
+// RCT _SIMD benchmarks below measure the same loop through the dispatch, and
+// the highway path is measured by ForwardRCT_DirectSIMD.
 
 func applyICTScalar(y, cb, cr [][]float64) (r, g, b [][]float64) {
 	height := len(y)

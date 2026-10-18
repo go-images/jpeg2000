@@ -4,13 +4,41 @@ import (
 	"math/rand/v2"
 	"slices"
 	"testing"
+
+	hwyimage "github.com/go-simd/highway/hwy/contrib/image"
 )
 
-// TestRCTScalarMatchesHighway holds the two implementations to the same
-// answer, sample for sample, on every build: the scalar one is what ships
-// where highway has no vector kernel, and the highway one is what ships on
-// arm64, so a difference between them would make a lossless file decode to
-// different pixels on different machines.
+// forwardRCTHighway and applyRCTHighway are the RCT as the package used to run
+// it, through highway's kernels. They are the ORACLE here: an independent
+// implementation the shipped loop must agree with, not a path anything ships.
+func forwardRCTHighway(r, g, b [][]int32) (y, cb, cr [][]int32) {
+	return rctThroughHighway(r, g, b, hwyimage.ForwardRCT[int32])
+}
+
+func applyRCTHighway(y, cb, cr [][]int32) (r, g, b [][]int32) {
+	return rctThroughHighway(y, cb, cr, hwyimage.InverseRCT[int32])
+}
+
+func rctThroughHighway(a, b, c [][]int32, kernel func(a, b, c, x, y, z *hwyimage.Image[int32])) (x, y, z [][]int32) {
+	if len(a) == 0 {
+		return nil, nil, nil
+	}
+	w, h := len(a[0]), len(a)
+	var imgs [6]*hwyimage.Image[int32]
+	for i := range imgs {
+		imgs[i] = hwyimage.NewImage[int32](w, h)
+	}
+	slicesToImageInPlace(a, imgs[0])
+	slicesToImageInPlace(b, imgs[1])
+	slicesToImageInPlace(c, imgs[2])
+	kernel(imgs[0], imgs[1], imgs[2], imgs[3], imgs[4], imgs[5])
+	return imageToSlices(imgs[3]), imageToSlices(imgs[4]), imageToSlices(imgs[5])
+}
+
+// TestRCTScalarMatchesHighway holds the shipped loop to highway's answer,
+// sample for sample, on every build. A difference would mean a lossless
+// file decodes to pixels other than the ones a reference implementation
+// gives.
 //
 // The samples are signed and reach past 16 bits so the arithmetic shift is
 // exercised on negative sums: ITU-T T.800 G.2 defines the RCT with floor, and
