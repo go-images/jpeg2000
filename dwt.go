@@ -3,7 +3,6 @@ package jpeg2000
 import (
 	"math"
 
-	"github.com/go-simd/highway/hwy"
 	"github.com/go-simd/highway/hwy/contrib/wavelet"
 )
 
@@ -49,9 +48,170 @@ func (b *dwtBufs97) ensure(n int) {
 	}
 }
 
-// synthesize1D_53 performs the 5/3 inverse transform using pre-allocated buffers.
+// The inverse 5/3 transform is plain Go, not a highway call, for the reason
+// the RCT is (see applyRCT). Without GOEXPERIMENT=simd, which nothing in the
+// fleet sets, highway's 5/3 lifting on amd64 runs its generic Vec[T]. That
+// type allocates in every Add, Sub and ShiftRight. Decoding one lossless
+// 1920x1080 RGB picture made 14.55 million allocations on amd64, against
+// 93 891 on arm64, and 97% of them came from this transform.
+//
+// The arithmetic is ITU-T T.800 F.3.8 in OpenJPEG's form (opj_dwt_decode_1_):
+// samples [low | high] on entry, interleaved on exit, with every neighbour
+// index CLAMPED into its subband. Clamping is the whole symmetric extension,
+// and it reproduces each boundary case highway special-cases.
+//
+//	update   low[i]  -= (high[a] + high[b] + 2) >> 2   a, b = i-1, i  (cas 0)  or  i, i+1  (cas 1)
+//	predict  high[i] += (low[a]  + low[b])      >> 1   a, b = i, i+1  (cas 0)  or  i-1, i  (cas 1)
+//
+// dwt53_test.go holds this to highway's result, sample for sample.
+
+// split53 returns how many low and high samples a signal of n has.
+func split53(n, cas int) (sn, dn int) {
+	if cas == 0 {
+		return (n + 1) / 2, n / 2
+	}
+	return n / 2, (n + 1) / 2
+}
+
+// clampIndex keeps i in [0, n-1].
+func clampIndex(i, n int) int {
+	if i < 0 {
+		return 0
+	}
+	if i >= n {
+		return n - 1
+	}
+	return i
+}
+
+// synthesize1D_53 performs the 5/3 inverse transform using pre-allocated
+// buffers; low and high each need room for (len(data)+1)/2 samples.
 func synthesize1D_53(data []int32, low, high []int32, cas int) {
-	wavelet.Synthesize53(data, cas, low, high)
+	n := len(data)
+	if n <= 1 {
+		if n == 1 && cas == 1 {
+			data[0] /= 2
+		}
+		return
+	}
+	sn, dn := split53(n, cas)
+	low, high = low[:sn], high[:dn]
+	copy(low, data[:sn])
+	copy(high, data[sn:n])
+	for i := range low {
+		a, b := i-1+cas, i+cas
+		low[i] -= (high[clampIndex(a, dn)] + high[clampIndex(b, dn)] + 2) >> 2
+	}
+	for i := range high {
+		a, b := i-cas, i+1-cas
+		high[i] += (low[clampIndex(a, sn)] + low[clampIndex(b, sn)]) >> 1
+	}
+	if cas == 0 {
+		for i, v := range low {
+			data[2*i] = v
+		}
+		for i, v := range high {
+			data[2*i+1] = v
+		}
+		return
+	}
+	for i, v := range high {
+		data[2*i] = v
+	}
+	for i, v := range low {
+		data[2*i+1] = v
+	}
+}
+
+// synthesizeRows53 is the vertical 5/3 pass done a whole ROW at a time:
+// rows [0, sn) of coeffs are the low subband and [sn, n) the high one, and
+// each lifting step adds one row to another. That reads memory in the order
+// it is laid out, where a column at a time reads one value per row.
+//
+// The lifting needs no copy: each step writes one subband and reads the
+// other, so it runs on the rows where they are. What remains is the
+// interleave, which only puts rows in another order. That is done by
+// following the permutation's cycles with one spare row (spare, width
+// samples) and n marks (seen). A first version copied the whole plane into a
+// scratch buffer instead, and that cost 24.6 MB on a 1920x1080 RGB decode.
+func synthesizeRows53(coeffs [][]int32, width, n, cas int, spare []int32, seen []bool) {
+	if n <= 1 {
+		if n == 1 && cas == 1 {
+			for x := range coeffs[0][:width] {
+				coeffs[0][x] /= 2
+			}
+		}
+		return
+	}
+	sn, dn := split53(n, cas)
+	low := func(i int) []int32 { return coeffs[i][:width] }
+	high := func(i int) []int32 { return coeffs[sn+i][:width] }
+	for i := range sn {
+		l := low(i)
+		ha, hb := high(clampIndex(i-1+cas, dn)), high(clampIndex(i+cas, dn))
+		for x := range l {
+			l[x] -= (ha[x] + hb[x] + 2) >> 2
+		}
+	}
+	for i := range dn {
+		h := high(i)
+		la, lb := low(clampIndex(i-cas, sn)), low(clampIndex(i+1-cas, sn))
+		for x := range h {
+			h[x] += (la[x] + lb[x]) >> 1
+		}
+	}
+
+	// Output row d comes from low row (d-cas)/2 when d has the parity of cas,
+	// and from high row (d-1+cas)/2 otherwise.
+	from := func(d int) int {
+		if (d-cas)%2 == 0 {
+			return (d - cas) / 2
+		}
+		return sn + (d-1+cas)/2
+	}
+	seen = seen[:n]
+	clear(seen)
+	spare = spare[:width]
+	for start := range n {
+		if seen[start] {
+			continue
+		}
+		seen[start] = true
+		if from(start) == start {
+			continue
+		}
+		copy(spare, coeffs[start][:width])
+		d := start
+		for {
+			s := from(d)
+			if s == start {
+				copy(coeffs[d][:width], spare)
+				break
+			}
+			copy(coeffs[d][:width], coeffs[s][:width])
+			seen[s] = true
+			d = s
+		}
+	}
+}
+
+// synthesize2D53 runs the levels coarsest first: rows, then columns, for
+// each resolution in turn.
+func synthesize2D53(coeffs [][]int32, levels []ResBounds) {
+	maxW, maxH := 0, 0
+	for _, rd := range levels {
+		maxW, maxH = max(maxW, rd.Width), max(maxH, rd.Height)
+	}
+	half := (max(maxW, maxH) + 1) / 2
+	low, high := make([]int32, half), make([]int32, half)
+	spare, seen := make([]int32, maxW), make([]bool, maxH)
+	for _, rd := range levels {
+		casH, casV := rd.X0%2, rd.Y0%2
+		for y := range rd.Height {
+			synthesize1D_53(coeffs[y][:rd.Width], low, high, casH)
+		}
+		synthesizeRows53(coeffs, rd.Width, rd.Height, casV, spare, seen)
+	}
 }
 
 // synthesize1D_97 performs in-place 1D inverse 9/7 wavelet transform
@@ -151,54 +311,14 @@ func Synthesize2D_53(coeffs [][]int32, width, height, levels int) {
 	if levels < 1 {
 		return
 	}
-
-	// Pre-allocate reusable buffers for the largest dimension.
-	maxDim := max(width, height)
-	maxHalf := (maxDim + 1) / 2
-	low53 := make([]int32, maxHalf)
-	high53 := make([]int32, maxHalf)
-	col := make([]int32, height)
-
-	// The column-batched kernel processes `lanes` columns per SIMD vector.
-	// lanes must match hwy.MaxLanes[int32]() so the kernel's internal
-	// hwy.Load/Store widths align with the column-interleaved layout.
-	lanes := hwy.MaxLanes[int32]()
-	colBuf := make([]int32, height*lanes)
-	lowCols := make([]int32, maxHalf*lanes)
-	highCols := make([]int32, maxHalf*lanes)
-
-	// Process from coarsest to finest level
+	dims := make([]ResBounds, 0, levels)
 	for level := levels; level >= 1; level-- {
-		levelWidth := (width + (1 << (level - 1)) - 1) >> (level - 1)
-		levelHeight := (height + (1 << (level - 1)) - 1) >> (level - 1)
-
-		// Horizontal synthesis first (process rows)
-		for y := range levelHeight {
-			synthesize1D_53(coeffs[y][:levelWidth], low53, high53, 0)
-		}
-
-		// Vertical synthesis: process `lanes` columns at a time
-		x := 0
-		for ; x+lanes <= levelWidth; x += lanes {
-			for y := range levelHeight {
-				copy(colBuf[y*lanes:y*lanes+lanes], coeffs[y][x:x+lanes])
-			}
-			wavelet.Synthesize53Cols(colBuf[:levelHeight*lanes], levelHeight, 0, lowCols, highCols)
-			for y := range levelHeight {
-				copy(coeffs[y][x:x+lanes], colBuf[y*lanes:y*lanes+lanes])
-			}
-		}
-		// Scalar remainder
-		for ; x < levelWidth; x++ {
-			for y := range levelHeight {
-				col[y] = coeffs[y][x]
-			}
-			synthesize1D_53(col[:levelHeight], low53, high53, 0)
-			for y := range levelHeight {
-				coeffs[y][x] = col[y]
-			}
-		}
+		dims = append(dims, ResBounds{
+			Width:  (width + (1 << (level - 1)) - 1) >> (level - 1),
+			Height: (height + (1 << (level - 1)) - 1) >> (level - 1),
+		})
 	}
+	synthesize2D53(coeffs, dims)
 }
 
 // ResBounds holds resolution-level bounds for DWT synthesis
@@ -213,66 +333,12 @@ type ResBounds struct {
 // resDims[i] contains bounds for resolution level i (0=coarsest)
 // The X0/Y0 values are used to compute DWT parity (cas) for tiles at odd positions.
 func Synthesize2D_53_WithDims(coeffs [][]int32, resDims []ResBounds) {
-	levels := len(resDims) - 1
-	if levels < 1 {
+	if len(resDims) < 2 {
 		return
 	}
-
-	// Pre-allocate reusable buffers for the largest dimension.
-	maxDim := 0
-	for _, rd := range resDims {
-		if rd.Width > maxDim {
-			maxDim = rd.Width
-		}
-		if rd.Height > maxDim {
-			maxDim = rd.Height
-		}
-	}
-	maxHalf := (maxDim + 1) / 2
-	lanes := hwy.MaxLanes[int32]()
-	low53 := make([]int32, maxHalf)
-	high53 := make([]int32, maxHalf)
-	col := make([]int32, maxDim)
-	colBuf := make([]int32, maxDim*lanes)
-	lowCols := make([]int32, maxHalf*lanes)
-	highCols := make([]int32, maxHalf*lanes)
-
-	// Process from coarsest to finest level
-	for level := levels; level >= 1; level-- {
-		resIdx := levels - level + 1
-		levelWidth := resDims[resIdx].Width
-		levelHeight := resDims[resIdx].Height
-
-		casH := resDims[resIdx].X0 % 2
-		casV := resDims[resIdx].Y0 % 2
-
-		// Horizontal synthesis first (process rows)
-		for y := range levelHeight {
-			synthesize1D_53(coeffs[y][:levelWidth], low53, high53, casH)
-		}
-
-		// Vertical synthesis: process `lanes` columns at a time
-		x := 0
-		for ; x+lanes <= levelWidth; x += lanes {
-			for y := range levelHeight {
-				copy(colBuf[y*lanes:y*lanes+lanes], coeffs[y][x:x+lanes])
-			}
-			wavelet.Synthesize53Cols(colBuf[:levelHeight*lanes], levelHeight, casV, lowCols, highCols)
-			for y := range levelHeight {
-				copy(coeffs[y][x:x+lanes], colBuf[y*lanes:y*lanes+lanes])
-			}
-		}
-		// Scalar remainder
-		for ; x < levelWidth; x++ {
-			for y := range levelHeight {
-				col[y] = coeffs[y][x]
-			}
-			synthesize1D_53(col[:levelHeight], low53, high53, casV)
-			for y := range levelHeight {
-				coeffs[y][x] = col[y]
-			}
-		}
-	}
+	// resDims[0] is the coarsest resolution, which has nothing to undo; each
+	// later one is synthesised from it in turn.
+	synthesize2D53(coeffs, resDims[1:])
 }
 
 // Synthesize2D_97 performs full 2D inverse 9/7 wavelet transform
