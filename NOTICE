@@ -23,3 +23,65 @@ carried here are stated:
               Files: color.go (convertToCMYK, convertToCMYKFloat, sameShape),
               decoder.go (isCMYK, picture, pictureUpsampled, toCMYK),
               cmyk_test.go, go.mod (module path).
+
+The entries below were added on 2026-10-18; until then this file named only
+the first change, although all of them had been made. Each names the pull
+request that carries its full reasoning and measurement.
+
+Changes to what is decoded or encoded:
+
+  2026-09-25  #2   The 9/7 synthesis no longer crashes on a tile or image whose
+                   origin is odd. Files: dwt.go, dwt_test.go.
+  2026-09-29  #19  9/7 coefficients are carried as float32, as OpenJPEG carries
+                   them, in place of float64 in a second buffer. Files:
+                   decoder.go, dwt.go, dwt_test.go, dwtpasses_test.go,
+                   encoder_test.go, packet.go.
+  2026-09-29  #23  The encoder anchors the code-block grid at the reference grid
+                   (ITU-T T.800 B.7), where the decoder always anchored it.
+                   Files: blockgrid.go, encoder.go, packet.go, tilegrid_test.go.
+  2026-09-29  #24  The encoder is given each tile's position as well as its size;
+                   a tiled encode had produced a codestream that this decoder
+                   and OpenJPEG both read wrongly. Files: blockgrid.go, dwt.go,
+                   dwt_encode.go, encoder.go, tilegrid_test.go.
+  2026-09-29  #25  The forward 9/7 transform scales a resolution one row high,
+                   as the inverse does. Files: dwt_encode.go, tilegrid_test.go.
+  2026-09-29  #26  The decoder accepts a tile none of whose code blocks is
+                   included in any packet, as the reference does. Files:
+                   packet.go, allzerotile_test.go.
+
+Changes that leave the output identical (speed, memory, dependencies):
+
+  2026-09-25  #3, #4         9/7 synthesis eight columns at a time; a tile row
+                             copied, not tested pixel by pixel. dwt.go,
+                             decoder.go.
+  2026-09-26  #5, #6         one allocation per component; components written
+                             straight into the SIMD images. decoder.go,
+                             packet.go, color.go, color_test.go.
+  2026-09-26  #12, #13       gather and scatter passes folded; EBCOT state rows
+                             bound once. dwt.go, dwtpasses_test.go, ebcot.go,
+                             go.mod.
+  2026-09-27  #14            comment only. packet.go.
+  2026-09-28  #15-#18        code blocks of a subband decoded in parallel;
+                             components read by the row; one byte a pixel for a
+                             one-component picture; whole-component tile
+                             coefficients handed over. ebcot.go, packet.go,
+                             subbandconst.go, color.go, sampler.go,
+                             decoder.go, greyout.go and their tests.
+  2026-09-29  #20-#22        the inverse ICT held a band of rows at a time; one
+                             buffer a component on the 9/7 path; comments on
+                             tile-grid placement. color.go, packet.go, view.go
+                             and their tests.
+  2026-10-04  #28            Go 1.27.1. bitreader.go, mq.go, go.mod and tests.
+  2026-10-18  #31            the SIMD dependency moves from
+                             github.com/ajroetker/go-highway v0.0.12, which no
+                             consumer could `go mod tidy` against (an
+                             unpublished hwy/goat v0.0.0), to its fork
+                             github.com/go-simd/highway. Import paths only.
+                             color.go, dwt.go, dwt_encode.go, simd.go, go.mod
+                             and tests.
+  2026-10-18  #32            the reversible colour transform is a plain loop on
+                             every architecture: highway's path was 22.8x
+                             slower on amd64 (its allocating generic fallback,
+                             since nothing sets GOEXPERIMENT=simd) and 2.1x
+                             slower on arm64 (the plane conversions). color.go,
+                             simd.go, rct_test.go, color_bench_test.go.
