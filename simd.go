@@ -86,37 +86,13 @@ func imageToSlicesInPlace[T hwy.Lanes](img *image.Image[T], data [][]T) {
 	}
 }
 
-// imageBufInt32 holds 6 pooled SIMD-aligned images for int32 color transforms
-// (3 input + 3 output).
-type imageBufInt32 struct {
-	imgs [6]*image.Image[int32]
-	w, h int
-}
-
 // imageBufFloat64 holds 6 pooled SIMD-aligned images for float64 color transforms.
 type imageBufFloat64 struct {
 	imgs [6]*image.Image[float64]
 	w, h int
 }
 
-var int32ImagePool = sync.Pool{New: func() any { return new(imageBufInt32) }}
 var float64ImagePool = sync.Pool{New: func() any { return new(imageBufFloat64) }}
-
-func getInt32Buf(w, h int) *imageBufInt32 {
-	buf := int32ImagePool.Get().(*imageBufInt32)
-	if buf.w != w || buf.h != h {
-		for i := range buf.imgs {
-			buf.imgs[i] = image.NewImage[int32](w, h)
-		}
-		buf.w = w
-		buf.h = h
-	}
-	return buf
-}
-
-func putInt32Buf(buf *imageBufInt32) {
-	int32ImagePool.Put(buf)
-}
 
 func getFloat64Buf(w, h int) *imageBufFloat64 {
 	buf := float64ImagePool.Get().(*imageBufFloat64)

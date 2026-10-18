@@ -11,30 +11,78 @@ import (
 // Y = (R + 2G + B) / 4  =>  G = Y - (Cb + Cr) / 4
 // Cb = B - G            =>  B = Cb + G
 // Cr = R - G            =>  R = Cr + G
+//
+// The RCT is a plain loop, not a highway call, on every architecture,
+// because the loop was measured faster on both runners we have
+// (GitHub, Go 1.27.2, n=10, one 4K frame):
+//
+//	                     highway path         plain loop
+//	amd64 forward        408.8 ms, 12.45 M    17.9 ms, 6 allocs
+//	amd64 inverse        341.0 ms, 10.37 M    18.4 ms, 6 allocs
+//	arm64 forward         29.9 ms             14.1 ms
+//	arm64 inverse         33.6 ms             14.6 ms
+//
+// On amd64, without GOEXPERIMENT=simd (which nothing in the fleet sets),
+// highway dispatches to its generic Vec[T]. That type allocates in every
+// Load, Add, Mul, Sub and ShiftRight. On arm64 the NEON kernel by itself
+// takes 6.3 ms, but copying the planes into highway's images and back costs
+// more than the kernel saves. rct_test.go keeps highway as the oracle the
+// loop is checked against.
 func applyRCT(y, cb, cr [][]int32) (r, g, b [][]int32) {
+	return applyRCTScalar(y, cb, cr)
+}
+
+// applyRCTScalar is the inverse RCT loop. Each output plane is one
+// allocation, sliced into rows.
+func applyRCTScalar(y, cb, cr [][]int32) (r, g, b [][]int32) {
 	height := len(y)
 	if height == 0 {
 		return nil, nil, nil
 	}
 	width := len(y[0])
-
-	buf := getInt32Buf(width, height)
-	defer putInt32Buf(buf)
-
-	// Copy inputs into pooled images
-	slicesToImageInPlace(y, buf.imgs[0])
-	slicesToImageInPlace(cb, buf.imgs[1])
-	slicesToImageInPlace(cr, buf.imgs[2])
-
-	// Apply SIMD inverse RCT
-	hwyimage.InverseRCT(buf.imgs[0], buf.imgs[1], buf.imgs[2], buf.imgs[3], buf.imgs[4], buf.imgs[5])
-
-	// Convert back to slices
-	r = imageToSlices(buf.imgs[3])
-	g = imageToSlices(buf.imgs[4])
-	b = imageToSlices(buf.imgs[5])
-
+	r, g, b = int32Plane(width, height), int32Plane(width, height), int32Plane(width, height)
+	for i := range height {
+		yRow, cbRow, crRow := y[i][:width], cb[i][:width], cr[i][:width]
+		rRow, gRow, bRow := r[i], g[i], b[i]
+		for j := range width {
+			gv := yRow[j] - ((cbRow[j] + crRow[j]) >> 2)
+			gRow[j] = gv
+			rRow[j] = crRow[j] + gv
+			bRow[j] = cbRow[j] + gv
+		}
+	}
 	return r, g, b
+}
+
+// forwardRCTScalar is the forward RCT loop; see applyRCTScalar.
+func forwardRCTScalar(r, g, b [][]int32) (y, cb, cr [][]int32) {
+	height := len(r)
+	if height == 0 {
+		return nil, nil, nil
+	}
+	width := len(r[0])
+	y, cb, cr = int32Plane(width, height), int32Plane(width, height), int32Plane(width, height)
+	for i := range height {
+		rRow, gRow, bRow := r[i][:width], g[i][:width], b[i][:width]
+		yRow, cbRow, crRow := y[i], cb[i], cr[i]
+		for j := range width {
+			rv, gv, bv := rRow[j], gRow[j], bRow[j]
+			yRow[j] = (rv + 2*gv + bv) >> 2
+			cbRow[j] = bv - gv
+			crRow[j] = rv - gv
+		}
+	}
+	return y, cb, cr
+}
+
+// int32Plane returns height rows of width samples over one backing array.
+func int32Plane(width, height int) [][]int32 {
+	data := make([]int32, width*height)
+	rows := make([][]int32, height)
+	for i := range rows {
+		rows[i] = data[i*width : (i+1)*width : (i+1)*width]
+	}
+	return rows
 }
 
 // applyICT applies inverse Irreversible Color Transform (lossy)
@@ -76,31 +124,10 @@ func applyICT(y, cb, cr [][]float64) (r, g, b [][]float64) {
 //	Cr = R - G
 //
 // This is the exact inverse of applyRCT: forwardRCT followed by applyRCT
-// yields the original RGB values (lossless round-trip).
+// yields the original RGB values (lossless round-trip). It is a plain loop
+// for the reason given at applyRCT.
 func forwardRCT(r, g, b [][]int32) (y, cb, cr [][]int32) {
-	height := len(r)
-	if height == 0 {
-		return nil, nil, nil
-	}
-	width := len(r[0])
-
-	buf := getInt32Buf(width, height)
-	defer putInt32Buf(buf)
-
-	// Copy inputs into pooled images
-	slicesToImageInPlace(r, buf.imgs[0])
-	slicesToImageInPlace(g, buf.imgs[1])
-	slicesToImageInPlace(b, buf.imgs[2])
-
-	// Apply SIMD forward RCT
-	hwyimage.ForwardRCT(buf.imgs[0], buf.imgs[1], buf.imgs[2], buf.imgs[3], buf.imgs[4], buf.imgs[5])
-
-	// Convert back to slices
-	y = imageToSlices(buf.imgs[3])
-	cb = imageToSlices(buf.imgs[4])
-	cr = imageToSlices(buf.imgs[5])
-
-	return y, cb, cr
+	return forwardRCTScalar(r, g, b)
 }
 
 // forwardICT applies the forward Irreversible Color Transform (lossy).
