@@ -20,9 +20,12 @@
 >   accepted;
 > - the SIMD dependency is [go-simd/highway](https://github.com/go-simd/highway),
 >   a fork of go-highway that consumers can `go mod tidy` against;
-> - the lossless colour transform is a plain loop, **22.8× faster on amd64
->   and 2.1× on arm64** than the highway path it replaced for a 4K frame
->   (6 allocations instead of 12.45 million on amd64);
+> - the lossless colour transform and the inverse 5/3 wavelet are plain
+>   loops, not highway calls. On amd64 highway took an allocating fallback,
+>   because nothing sets `GOEXPERIMENT=simd`. A whole lossless 1920×1080
+>   decode on amd64 went from **638 ms and 14.55 million allocations to
+>   269 ms and 93 thousand**, the same allocation count as arm64. arm64 is
+>   not slower (−1.5 %);
 > - many decode-speed and memory changes that leave the output identical.
 
 [![Go](https://github.com/go-images/jpeg2000/actions/workflows/go.yml/badge.svg)](https://github.com/go-images/jpeg2000/actions/workflows/go.yml)
