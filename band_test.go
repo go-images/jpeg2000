@@ -4,7 +4,7 @@ import (
 	"image"
 	"testing"
 
-	hwyimage "github.com/ajroetker/go-highway/hwy/contrib/image"
+	hwyimage "github.com/go-simd/highway/hwy/contrib/image"
 )
 
 // wholePageICT is convertYCbCrInt32ToRGBA as it was before the band: six SIMD

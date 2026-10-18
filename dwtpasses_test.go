@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/ajroetker/go-highway/hwy/contrib/wavelet"
+	"github.com/go-simd/highway/hwy/contrib/wavelet"
 )
 
 // reference97 is the 1D synthesis as it was written before the scaling was

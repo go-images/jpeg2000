@@ -3,8 +3,8 @@ package jpeg2000
 import (
 	"math"
 
-	"github.com/ajroetker/go-highway/hwy"
-	"github.com/ajroetker/go-highway/hwy/contrib/wavelet"
+	"github.com/go-simd/highway/hwy"
+	"github.com/go-simd/highway/hwy/contrib/wavelet"
 )
 
 // WaveletType indicates the wavelet filter used

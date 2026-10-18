@@ -1,7 +1,7 @@
 package jpeg2000
 
 import (
-	"github.com/ajroetker/go-highway/hwy/contrib/wavelet"
+	"github.com/go-simd/highway/hwy/contrib/wavelet"
 )
 
 // Analyze2D_53 performs forward 2D 5/3 wavelet transform (lossless).
