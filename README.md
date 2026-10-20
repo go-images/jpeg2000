@@ -26,6 +26,11 @@
 >   decode on amd64 went from **638 ms and 14.55 million allocations to
 >   269 ms and 93 thousand**, the same allocation count as arm64. arm64 is
 >   not slower (−1.5 %);
+> - **fuzzed** (`FuzzDecode`, `FuzzDecodeConfig`), and the headers validated
+>   as OpenJPEG validates them: fuzzing found three panics reachable from
+>   `DecodeConfig`, all fixed in v0.13.8. `Decode` still has no pixel limit, so
+>   call `DecodeConfig` first and refuse what you cannot afford, as
+>   go-pdfkit/render does;
 > - many decode-speed and memory changes that leave the output identical.
 
 [![Go](https://github.com/go-images/jpeg2000/actions/workflows/go.yml/badge.svg)](https://github.com/go-images/jpeg2000/actions/workflows/go.yml)
