@@ -91,3 +91,13 @@ Changes that leave the output identical (speed, memory, dependencies):
                              on amd64 (a lossless 1080p decode: 638 ms and
                              14.55 M allocations, now 269 ms and 93 k). dwt.go,
                              dwt53_test.go, decode_bench_test.go.
+  2026-10-20  #36            security: the main and tile-part headers are
+                             validated as OpenJPEG validates them (SIZ first;
+                             SIZ sizes, offsets, subsampling and precision;
+                             every segment's length before it is read; COD
+                             and COC coding parameters; tile and component
+                             indices). Fuzzing had found three panics
+                             reachable from DecodeConfig. A header that breaks
+                             these rules is now refused with an error.
+                             codestream.go, segment.go, fuzz_test.go,
+                             testdata/fuzz.
