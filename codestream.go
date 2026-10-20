@@ -362,9 +362,29 @@ func parseCodestream(data []byte) (*MainHeader, []*Tile, error) {
 	mainHeaderDone := false
 
 	// Parse marker segments
+	sizSeen := false
 	for pos+2 <= len(data) {
 		marker := binary.BigEndian.Uint16(data[pos : pos+2])
 		pos += 2
+
+		// ⛔ T.800 A.5.1: SIZ is the second marker of every codestream, right
+		// after SOC. Everything after it reads the image size, the tile grid
+		// or the component count that SIZ declares, so a segment that came
+		// first read zeros: SOC then SOT divided a tile index by a tile count
+		// of nought (found by FuzzDecode, 14 bytes).
+		if !sizSeen && marker != markerSIZ {
+			return nil, nil, fmt.Errorf("%w: marker %#04x before SIZ", ErrInvalidHeader, marker)
+		}
+		// Every marker this loop parses, or skips by its length, has that
+		// length checked first (segment.go). Unknown markers keep the tolerant
+		// handling in the default branch below.
+		switch marker {
+		case markerSIZ, markerCOD, markerCOC, markerQCD, markerQCC, markerPOC,
+			markerTLM, markerPPM, markerSOT:
+			if _, err := checkSegment(data, pos, marker, header.NumComps); err != nil {
+				return nil, nil, err
+			}
+		}
 
 		switch marker {
 		case markerEOC:
@@ -384,6 +404,7 @@ func parseCodestream(data []byte) (*MainHeader, []*Tile, error) {
 				return nil, nil, err
 			}
 			pos = newPos
+			sizSeen = true
 
 		case markerCOD:
 			if mainHeaderDone {
@@ -483,6 +504,11 @@ func parseCodestream(data []byte) (*MainHeader, []*Tile, error) {
 
 			tileIndex := int(binary.BigEndian.Uint16(data[pos+2 : pos+4]))
 			tilePartLen := int(binary.BigEndian.Uint32(data[pos+4 : pos+8]))
+			// OpenJPEG opj_j2k_read_sot, after its 2.pdf.SIGFPE: a tile index
+			// must name a tile the grid has.
+			if tileIndex >= header.NumTiles {
+				return nil, nil, fmt.Errorf("%w: tile %d of %d", ErrInvalidHeader, tileIndex, header.NumTiles)
+			}
 
 			// Calculate end of tile-part (SOT marker position - 2 + tilePartLen)
 			sotMarkerPos := pos - 2 // We already moved past marker
@@ -548,6 +574,17 @@ func parseCodestream(data []byte) (*MainHeader, []*Tile, error) {
 
 					pos = dataEnd
 					break
+				}
+
+				// The same length check as in the main header, before any of
+				// the parsers below reads the segment. A malformed one ends the
+				// tile-part header, as an unreadable length already did.
+				switch tphMarker {
+				case markerCOD, markerRGN, markerQCD, markerPPT, markerPOC:
+					if _, err := checkSegment(data, pos+2, tphMarker, header.NumComps); err != nil {
+						pos = tilePartEnd
+						continue
+					}
 				}
 
 				// Parse COD marker to get tile-specific coding style
@@ -736,6 +773,36 @@ func parseSIZ(data []byte, pos int, h *MainHeader) (int, error) {
 		return pos, fmt.Errorf("%w: invalid component count: %d", ErrInvalidHeader, h.NumComps)
 	}
 
+	// The checks below are OpenJPEG's (opj_j2k_read_siz, j2k.c), in its order.
+	// Each one there names the crashing file that prompted it, and most of
+	// those files came out of PDFs, which is where go-pdfkit/render feeds this
+	// decoder from. Without them a SIZ segment from an untrusted file could
+	// divide by zero (a zero tile size: OpenJPEG's 2539.pdf.SIGFPE), or yield
+	// a negative image or a component with no samples. The values are compared
+	// as int64 because a 32-bit int would turn a Uint32 above 2^31 negative.
+	if segLen != 38+3*h.NumComps {
+		return pos, fmt.Errorf("%w: SIZ length %d does not hold %d components", ErrInvalidHeader, segLen, h.NumComps)
+	}
+	u32 := func(off int) int64 { return int64(binary.BigEndian.Uint32(data[pos+off : pos+off+4])) }
+	x1, y1, x0, y0 := u32(4), u32(8), u32(12), u32(16)
+	tdx, tdy, tx0, ty0 := u32(20), u32(24), u32(28), u32(32)
+	if x0 >= x1 || y0 >= y1 {
+		return pos, fmt.Errorf("%w: SIZ declares an empty or negative image", ErrInvalidHeader)
+	}
+	if tdx == 0 || tdy == 0 {
+		return pos, fmt.Errorf("%w: SIZ declares a zero tile size", ErrInvalidHeader)
+	}
+	if tx0 > x0 || ty0 > y0 || tx0+tdx <= x0 || ty0+tdy <= y0 {
+		return pos, fmt.Errorf("%w: SIZ declares an illegal tile offset", ErrInvalidHeader)
+	}
+	// Every coordinate must fit an int on a 32-bit build, where this package
+	// is also tested; no image is 2^31 samples wide.
+	for _, v := range []int64{x1, y1, tdx, tdy} {
+		if v > math.MaxInt32 {
+			return pos, fmt.Errorf("%w: SIZ value %d is out of range", ErrInvalidHeader, v)
+		}
+	}
+
 	// Component parameters
 	h.BitDepth = make([]int, h.NumComps)
 	h.Signed = make([]bool, h.NumComps)
@@ -753,6 +820,16 @@ func parseSIZ(data []byte, pos int, h *MainHeader) (int, error) {
 		h.BitDepth[i] = int((ssiz & 0x7F) + 1)
 		h.XRsiz[i] = int(data[offset+1])
 		h.YRsiz[i] = int(data[offset+2])
+		// T.800 Table A.9: XRsiz and YRsiz are 1..255; a zero is a division by
+		// zero wherever a component's size is computed.
+		if h.XRsiz[i] < 1 || h.YRsiz[i] < 1 {
+			return pos, fmt.Errorf("%w: component %d has a zero subsampling factor", ErrInvalidHeader, i)
+		}
+		// OpenJPEG refuses more than 31 bits for the same reason this must:
+		// the DC level shift is 1 << (precision-1) in an int32.
+		if h.BitDepth[i] > 31 {
+			return pos, fmt.Errorf("%w: component %d has %d bits; at most 31 are supported", ErrInvalidHeader, i, h.BitDepth[i])
+		}
 	}
 
 	// Compute tile grid dimensions per ITU-T T.800:
@@ -805,8 +882,8 @@ func parseCOD(data []byte, pos int, h *MainHeader) (int, error) {
 	// SPcod - number of decomposition levels
 	h.NumDecompLevels = int(data[pos+7])
 
-	if h.NumDecompLevels > 32 {
-		return pos, fmt.Errorf("%w: too many decomposition levels: %d", ErrInvalidHeader, h.NumDecompLevels)
+	if err := checkSPcod(data[pos+7:pos+segLen], hasCustomPrecincts); err != nil {
+		return pos, err
 	}
 
 	// SPcod - code block width
@@ -884,6 +961,12 @@ func parseTileCOD(data []byte, pos int, tile *Tile) (int, error) {
 	// - SPcod: pos+7 = decomp levels, pos+8 = cb width exp, pos+9 = cb height exp,
 	//          pos+10 = cb style, pos+11 = wavelet transform
 	//          pos+12.. = precinct sizes (if Scod bit 0 set)
+	//
+	// Validated before anything is stored, so a rejected tile COD leaves the
+	// tile on the main header's parameters.
+	if err := checkSPcod(data[pos+7:pos+segLen], data[pos+2]&0x01 != 0); err != nil {
+		return pos, err
+	}
 	tile.HasTileCOD = true
 
 	// SGcod: progression order
@@ -1020,9 +1103,14 @@ func parseCOC(data []byte, pos int, h *MainHeader) (int, error) {
 	// SPcoc starts at pos+2+compOffset+1
 	spcPos := pos + 2 + compOffset + 1
 
-	// Verify we have enough data for all SPcoc fields
-	if spcPos+5 > pos+segLen {
-		return pos + segLen, nil
+	// checkSegment guaranteed the five SPcoc fields. OpenJPEG's
+	// opj_j2k_read_coc rejects a component the image does not have; the
+	// parameters are checked as COD's are.
+	if compIdx >= h.NumComps {
+		return pos, fmt.Errorf("%w: COC for component %d of %d", ErrInvalidHeader, compIdx, h.NumComps)
+	}
+	if err := checkSPcod(data[spcPos:pos+segLen], data[pos+2+compOffset]&0x01 != 0); err != nil {
+		return pos, err
 	}
 
 	// Initialize per-component storage if needed
