@@ -28,9 +28,16 @@
 >   not slower (−1.5 %);
 > - **fuzzed** (`FuzzDecode`, `FuzzDecodeConfig`), and the headers validated
 >   as OpenJPEG validates them: fuzzing found three panics reachable from
->   `DecodeConfig`, all fixed in v0.13.8. `Decode` still has no pixel limit, so
->   call `DecodeConfig` first and refuse what you cannot afford, as
->   go-pdfkit/render does;
+>   `DecodeConfig`, all fixed in v0.13.8;
+> - **a sample ceiling** (v0.14.0): `DecodeOptions.MaxSamples`, zero meaning
+>   `DefaultMaxSamples` (2²⁸, one GiB of coefficients), refused with
+>   `ErrTooLarge` before anything is allocated. A pixel limit alone does not
+>   bound a JPEG 2000 decode: a codestream may declare 16384 components, all
+>   allocated at full size even with no data. Measured before: an **846-byte**
+>   codestream (256 components of 512×512) allocated **277.5 MB** and decoded
+>   without complaint. A subsampled component counts at the size it is
+>   upsampled to (XRsiz/YRsiz up to 255 understated it 65025 times). Fuzzing
+>   found a fourth panic, a component 0 samples wide upsampled, also fixed;
 > - many decode-speed and memory changes that leave the output identical.
 
 [![Go](https://github.com/go-images/jpeg2000/actions/workflows/go.yml/badge.svg)](https://github.com/go-images/jpeg2000/actions/workflows/go.yml)

@@ -101,3 +101,13 @@ Changes that leave the output identical (speed, memory, dependencies):
                              these rules is now refused with an error.
                              codestream.go, segment.go, fuzz_test.go,
                              testdata/fuzz.
+  2026-10-31  (this change)  security: DecodeOptions.MaxSamples,
+                             DefaultMaxSamples (2^28) and ErrTooLarge; every
+                             entry point refuses, before allocating, a
+                             codestream whose components hold more samples
+                             than the ceiling, a subsampled component counted
+                             at its upsampled size. An 846-byte codestream had
+                             allocated 277.5 MB. upsampleComponents no longer
+                             indexes -1 for a component 0 samples wide (found
+                             by fuzzing). decoder.go,
+                             component_budget_test.go, testdata/fuzz.
