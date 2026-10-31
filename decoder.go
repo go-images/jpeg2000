@@ -1,6 +1,7 @@
 package jpeg2000
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -22,7 +23,28 @@ type DecodeOptions struct {
 	// 2 means quarter resolution (skip two finest levels), etc.
 	// The output image dimensions are divided by 2^Reduce.
 	Reduce int
+
+	// MaxSamples refuses a codestream whose components, summed, hold more
+	// samples than this (each is an int32 while decoding). Zero means
+	// [DefaultMaxSamples].
+	MaxSamples int64
 }
+
+// DefaultMaxSamples is the most samples, over every component, a decode will
+// allocate when no ceiling is given: 2^28, one GiB of int32 coefficients.
+//
+// ⛔ A pixel ceiling does not bound a JPEG 2000 decode. A codestream may
+// declare up to 16384 components (T.800 Csiz), each 3 bytes of SIZ, and every
+// declared component is allocated at its full size even when no packet writes
+// it. Measured before this existed: an 846-byte codestream declaring 256
+// components of 512x512 allocated 277.5 MB and decoded without complaint.
+// 2^28 still admits 40 million RGBA pixels, go-pdfkit/render's ceiling, with
+// room to spare.
+const DefaultMaxSamples int64 = 1 << 28
+
+// ErrTooLarge reports a codestream that declares more samples than the
+// decode's ceiling allows. It is returned before the samples are allocated.
+var ErrTooLarge = errors.New("jpeg2000: image larger than the sample ceiling")
 
 // Decoder holds state for decoding a JPEG2000 image
 type Decoder struct {
@@ -238,6 +260,11 @@ func extractCodestream(data []byte) ([]byte, *JP2Metadata) {
 
 // decodeTiles decodes all tiles using EBCOT
 func (d *Decoder) decodeTiles() error {
+	// Every entry point comes through here before the first sample is
+	// allocated, so this is where the ceiling is enforced.
+	if err := d.checkSampleBudget(); err != nil {
+		return err
+	}
 	// Component storage is allocated WHEN IT IS WRITTEN, not here: a tile that
 	// covers its whole component hands its own coefficients over instead, and
 	// allocating up front would keep the buffer that hand-over exists to avoid.
@@ -261,6 +288,44 @@ func (d *Decoder) decodeTiles() error {
 	}
 
 	return nil
+}
+
+// checkSampleBudget refuses a codestream whose components, at the decode's
+// reduction and summed, hold more samples than the ceiling. Counted in int64
+// from the header's int sizes: on a 32-bit build an int product of two
+// file-chosen numbers is how a ceiling is passed by overflowing past it.
+func (d *Decoder) checkSampleBudget() error {
+	max := d.opts.MaxSamples
+	if max <= 0 {
+		max = DefaultMaxSamples
+	}
+	scale := int64(1) << d.opts.Reduce
+	full := max64(int64(d.header.Width), 1) * max64(int64(d.header.Height), 1)
+	var total int64
+	for c := 0; c < d.header.NumComps; c++ {
+		w := max64(int64(d.header.ComponentWidth(c))/scale, 1)
+		h := max64(int64(d.header.ComponentHeight(c))/scale, 1)
+		// ⛔ A subsampled component is stored small and may be UPSAMPLED to
+		// the full image (upsampleComponents: always in DecodeWithUpsampling,
+		// and in Decode when a colour transform meets subsampling). XRsiz and
+		// YRsiz reach 255, so the stored size can understate the allocation
+		// 65025 times; count what the upsampler would allocate.
+		if c < len(d.header.XRsiz) && c < len(d.header.YRsiz) && (d.header.XRsiz[c] > 1 || d.header.YRsiz[c] > 1) {
+			w, h = 1, full
+		}
+		total += w * h // below 2^62 each; the loop stops long before a sum could wrap
+		if total > max {
+			return fmt.Errorf("%w: %d components declare more than %d samples", ErrTooLarge, d.header.NumComps, max)
+		}
+	}
+	return nil
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // coversWholeComponent reports whether a tile's coefficients ARE the component
@@ -548,7 +613,9 @@ func (d *Decoder) upsampleComponents() {
 				if srcX >= srcWidth {
 					srcX = srcWidth - 1
 				}
-				if srcY < len(d.components[c]) && srcX < len(d.components[c][srcY]) {
+				// A component can be 0 wide or high (its origin and extent
+				// round to the same sample), which made srcY or srcX -1.
+				if srcY >= 0 && srcX >= 0 && srcY < len(d.components[c]) && srcX < len(d.components[c][srcY]) {
 					upsampled[y][x] = d.components[c][srcY][srcX]
 				}
 			}
